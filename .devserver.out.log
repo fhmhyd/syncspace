@@ -1,0 +1,182 @@
+
+> syncscreen@0.1.0 dev
+> next dev
+
+   ▲ Next.js 15.5.14
+   - Local:        http://localhost:3000
+   - Network:      http://192.168.56.1:3000
+   - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 3.8s
+ ○ Compiling /_not-found ...
+ ✓ Compiled /_not-found in 4s (624 modules)
+ GET /api/socket/io?EIO=4&transport=polling&t=jskalfy1 404 in 5479ms
+ GET /api/socket/io?EIO=4&transport=polling&t=jsl4hlo6 404 in 5460ms
+ ○ Compiling /room/[roomId] ...
+ ✓ Compiled /room/[roomId] in 2.9s (955 modules)
+ GET /api/socket/io?EIO=4&transport=polling&t=jsv0816f 404 in 1459ms
+ GET /api/socket/io?EIO=4&transport=polling&t=jsuzyet7 404 in 1424ms
+ GET /room/593c18b7 200 in 5624ms
+ GET /api/socket/io?EIO=4&transport=polling&t=jt0168u2 404 in 262ms
+ ○ Compiling /api/auth/[...nextauth] ...
+ ✓ Compiled /api/auth/[...nextauth] in 944ms (789 modules)
+ ✓ Compiled in 915ms (449 modules)
+ GET /api/socket 200 in 2806ms
+ GET /room/593c18b7 200 in 1618ms
+ GET /room/593c18b7 200 in 310ms
+ GET /api/auth/session 200 in 6101ms
+ GET /api/auth/session 200 in 74ms
+ GET /api/auth/session 200 in 254ms
+ GET /room/593c18b7 200 in 328ms
+ GET /room/593c18b7 200 in 809ms
+ GET /room/593c18b7 200 in 954ms
+ GET /api/socket 200 in 77ms
+ GET /api/auth/session 200 in 134ms
+ ○ Compiling / ...
+ ✓ Compiled / in 1469ms (1254 modules)
+ GET / 200 in 2057ms
+ GET /api/auth/session 200 in 109ms
+ ○ Compiling /api/rooms ...
+ ✓ Compiled /api/rooms in 1377ms (1269 modules)
+ POST /api/rooms 201 in 1772ms
+ GET /room/eac30ea2 200 in 995ms
+ GET /api/socket 200 in 48ms
+ GET /api/auth/session 200 in 148ms
+ GET /room/eac30ea2 200 in 277ms
+ GET /api/socket 200 in 24ms
+ GET /api/auth/session 200 in 127ms
+ GET /api/socket 200 in 22ms
+ GET /api/auth/session 200 in 118ms
+ GET / 200 in 990ms
+ GET /api/auth/session 200 in 182ms
+ GET /room/eac30ea2 200 in 775ms
+ GET /api/socket 200 in 156ms
+ GET /api/auth/session 200 in 637ms
+ GET / 200 in 324ms
+ GET /api/auth/session 200 in 69ms
+ GET /api/auth/csrf 200 in 42ms
+ POST /api/auth/signout 200 in 19ms
+ GET / 200 in 243ms
+ GET /api/auth/session 200 in 153ms
+ GET /api/auth/providers 200 in 33ms
+ GET /api/auth/csrf 200 in 22ms
+ POST /api/auth/signin/google 200 in 427ms
+ GET / 200 in 129ms
+ GET /api/auth/session 200 in 50ms
+ GET /api/auth/providers 200 in 29ms
+ GET /api/auth/csrf 200 in 23ms
+ POST /api/auth/signin/google 200 in 419ms
+ GET /api/auth/callback/google?state=VgxirjOBlPGPsWAU71VociVoCwWTZ_fVNgP2JNdjpGY&iss=https%3A%2F%2Faccounts.google.com&code=4%2F0Aci98E_pH0ZM9iyScx-JDyy9Mblu4Y3C_blbAZgfDxiDf050lDg-fdqCvK5b6tp2hTX4Fw&scope=email+profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email+openid&authuser=2&prompt=none 302 in 822ms
+ GET / 200 in 564ms
+ GET /api/auth/session 200 in 40ms
+ GET /api/auth/session 200 in 47ms
+ GET /api/auth/csrf 200 in 22ms
+ POST /api/auth/signout 200 in 25ms
+ GET / 200 in 382ms
+ GET /api/auth/session 200 in 43ms
+ ✓ Compiled in 3.1s (1210 modules)
+ ✓ Compiled in 4.2s (1224 modules)
+ GET / 200 in 7302ms
+ GET / 200 in 439ms
+ ○ Compiling /api/auth/[...nextauth] ...
+ ✓ Compiled /api/auth/[...nextauth] in 659ms (770 modules)
+ GET /api/auth/session 200 in 1052ms
+ ✓ Compiled in 2.1s (1210 modules)
+ ✓ Compiled in 938ms (1224 modules)
+ GET / 200 in 439ms
+ GET / 200 in 630ms
+ ✓ Compiled /api/auth/[...nextauth] in 437ms (770 modules)
+ GET /api/auth/session 200 in 733ms
+ ✓ Compiled in 1429ms (1224 modules)
+ GET / 200 in 548ms
+ ✓ Compiled in 1366ms (1224 modules)
+ GET / 200 in 310ms
+ GET / 200 in 374ms
+ ✓ Compiled /api/auth/[...nextauth] in 402ms (770 modules)
+ GET /api/auth/session 200 in 869ms
+ GET / 200 in 687ms
+ GET /api/auth/session 200 in 41ms
+ ✓ Compiled in 2.9s (1217 modules)
+ ✓ Compiled in 1077ms (1224 modules)
+ GET / 200 in 838ms
+ GET / 200 in 417ms
+ ○ Compiling /api/auth/[...nextauth] ...
+ ✓ Compiled /api/auth/[...nextauth] in 525ms (770 modules)
+ GET /api/auth/session 200 in 843ms
+ ✓ Compiled in 1816ms (1224 modules)
+ GET / 200 in 587ms
+ ✓ Compiled in 1447ms (1224 modules)
+ GET / 200 in 354ms
+ ✓ Compiled in 1600ms (1224 modules)
+ GET / 200 in 184ms
+ ✓ Compiled in 1245ms (1224 modules)
+ GET / 200 in 218ms
+ ✓ Compiled in 709ms (1224 modules)
+ GET / 200 in 276ms
+ GET / 200 in 746ms
+ ○ Compiling /api/auth/[...nextauth] ...
+ ✓ Compiled /api/auth/[...nextauth] in 875ms (770 modules)
+ GET /api/auth/session 200 in 1434ms
+ GET / 200 in 1057ms
+ ✓ Compiled in 1734ms (1224 modules)
+ GET / 200 in 1460ms
+ ✓ Compiled /api/auth/[...nextauth] in 257ms (770 modules)
+ GET /api/auth/session 200 in 688ms
+ ✓ Compiled in 2.2s (1210 modules)
+ ✓ Compiled in 939ms (1224 modules)
+ GET / 200 in 583ms
+ GET / 200 in 472ms
+ ✓ Compiled /api/auth/[...nextauth] in 319ms (770 modules)
+ GET /api/auth/session 200 in 682ms
+ ✓ Compiled in 2s (1224 modules)
+ GET / 200 in 750ms
+ GET / 200 in 504ms
+ ○ Compiling /api/auth/[...nextauth] ...
+ ✓ Compiled /api/auth/[...nextauth] in 958ms (770 modules)
+ GET /api/auth/session 200 in 1275ms
+ GET /api/auth/providers 200 in 24ms
+ GET /api/auth/csrf 200 in 35ms
+ POST /api/auth/signin/google 200 in 708ms
+ GET /api/auth/callback/google?state=_f6Im1Ic0SK2xleBs8S45_GmLAb9kO0yZvAVyLmy3yU&iss=https%3A%2F%2Faccounts.google.com&code=4%2F0Aci98E8IhP8eM6PhEXFPrSbhl78bk-6p8P9FhGYyUDPvZ9Ci74asLlElhaImCO2ZWj8PMg&scope=email+profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile+openid&authuser=1&prompt=none 302 in 877ms
+ GET / 200 in 595ms
+ GET /api/auth/session 200 in 74ms
+ ○ Compiling /api/rooms ...
+ ✓ Compiled /api/rooms in 1013ms (784 modules)
+ POST /api/rooms 201 in 1355ms
+ GET /room/a85a437b 200 in 1079ms
+ ○ Compiling /api/socket ...
+ ✓ Compiled /api/socket in 826ms (817 modules)
+ GET /api/socket 200 in 2000ms
+ GET /api/auth/session 200 in 2242ms
+ GET /api/auth/csrf 200 in 25ms
+ POST /api/auth/signout 200 in 42ms
+ GET /room/a85a437b 307 in 685ms
+ GET /?callbackUrl=%2Froom%2Fa85a437b 200 in 484ms
+ GET /api/auth/session 200 in 51ms
+ GET /api/auth/providers 200 in 37ms
+ GET /api/auth/csrf 200 in 37ms
+ POST /api/auth/signin/google 200 in 424ms
+ GET /api/auth/callback/google?state=Pqs7V-TtBuHrpupmGkxxNpP70F-iLFDdOfgDmIIgEmc&iss=https%3A%2F%2Faccounts.google.com&code=4%2F0Aci98E8RYvfdl5azNDAuiP8Y9Hn1TvpAM4h8dDsSSYbIC8_8BfMXzu8orhBTn28zd_Hrlw&scope=email+profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile+openid&authuser=1&prompt=none 302 in 764ms
+ GET /room/a85a437b 200 in 680ms
+ GET /api/socket 200 in 18ms
+ GET /api/auth/session 200 in 120ms
+ GET / 200 in 317ms
+ GET /api/auth/session 200 in 49ms
+ POST /api/rooms 201 in 88ms
+ GET /room/f867a429 200 in 424ms
+ GET /api/socket 200 in 446ms
+ GET /api/auth/session 200 in 414ms
+ GET /api/auth/csrf 200 in 66ms
+ POST /api/auth/signout 200 in 102ms
+ GET /room/f867a429 307 in 456ms
+ GET /?callbackUrl=%2Froom%2Ff867a429 200 in 731ms
+ GET /api/auth/session 200 in 333ms
+ GET /api/auth/providers 200 in 32ms
+ GET /api/auth/csrf 200 in 24ms
+ POST /api/auth/signin/google 200 in 433ms
+ GET /api/auth/callback/google?state=ZpWWmb5PES4it1EwBGxAJ9ukWmxE6r9U4pjk3Tgtq4c&iss=https%3A%2F%2Faccounts.google.com&code=4%2F0Aci98E8J0Q4Kg25aWcZVzoU9UThq8vNIsROHyHkqHzKW64QsvRzk2AwRE9KKI7wIsnJ5BQ&scope=email+profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email+openid&authuser=1&prompt=none 302 in 1076ms
+ GET /room/f867a429 200 in 307ms
+ GET /api/socket 200 in 22ms
+ GET /api/auth/session 200 in 99ms
+ GET /api/auth/session 200 in 58ms
