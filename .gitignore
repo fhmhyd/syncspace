@@ -6,3 +6,5 @@ tsconfig.tsbuildinfo
 .devserver*.log
 auth-cookies.txt
 local-auth-cookies.txt
+
+.vercel

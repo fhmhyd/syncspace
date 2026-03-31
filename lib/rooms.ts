@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { kv } from "@vercel/kv";
+import { createClient } from "redis";
 
 export type PlaybackState = "playing" | "paused";
 
@@ -63,6 +64,7 @@ const ROOM_PREFIX = "syncscreen:room:";
 const ROOMS_SET_KEY = "syncscreen:active_rooms";
 
 const useKv = Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+const useRedisUrl = Boolean(process.env.REDIS_URL);
 
 interface KvLike {
   set(key: string, value: unknown, opts?: { ex?: number }): Promise<unknown>;
@@ -105,10 +107,80 @@ class MemoryKv implements KvLike {
   }
 }
 
-const kvStore: KvLike = useKv ? kv : new MemoryKv();
+class RedisUrlStore implements KvLike {
+  constructor(private readonly client: ReturnType<typeof createClient>) {}
+
+  async set(key: string, value: unknown, opts?: { ex?: number }): Promise<unknown> {
+    const serialized = JSON.stringify(value);
+    if (opts?.ex) {
+      return this.client.set(key, serialized, { EX: opts.ex });
+    }
+    return this.client.set(key, serialized);
+  }
+
+  async get<T>(key: string): Promise<T | null> {
+    const raw = await this.client.get(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  }
+
+  async del(key: string): Promise<unknown> {
+    return this.client.del(key);
+  }
+
+  async smembers(key: string): Promise<string[]> {
+    return this.client.sMembers(key);
+  }
+
+  async sadd(key: string, member: string): Promise<unknown> {
+    return this.client.sAdd(key, member);
+  }
+
+  async srem(key: string, member: string): Promise<unknown> {
+    return this.client.sRem(key, member);
+  }
+}
+
+declare global {
+  var __syncScreenRoomsAsync: RoomStore | undefined;
+  var __syncScreenRedisClient: ReturnType<typeof createClient> | undefined;
+  var __syncScreenKvStore: KvLike | undefined;
+}
+
+function getRedisClient(): ReturnType<typeof createClient> {
+  if (!global.__syncScreenRedisClient) {
+    const client = createClient({
+      url: process.env.REDIS_URL
+    });
+    client.on("error", (error) => {
+      console.error("Redis client error", error);
+    });
+    global.__syncScreenRedisClient = client;
+  }
+
+  if (!global.__syncScreenRedisClient.isOpen) {
+    void global.__syncScreenRedisClient.connect();
+  }
+
+  return global.__syncScreenRedisClient;
+}
+
+function getKvStore(): KvLike {
+  if (!global.__syncScreenKvStore) {
+    if (useKv) {
+      global.__syncScreenKvStore = kv;
+    } else if (useRedisUrl) {
+      global.__syncScreenKvStore = new RedisUrlStore(getRedisClient());
+    } else {
+      global.__syncScreenKvStore = new MemoryKv();
+    }
+  }
+
+  return global.__syncScreenKvStore;
+}
 
 export class RoomStore {
   async createRoom(input: { title: string; ownerName: string; ownerUserId: string }): Promise<RoomState> {
+    const kvStore = getKvStore();
     const roomId = randomUUID().slice(0, 8);
     const createdAt = Date.now();
     const room: RoomState = {
@@ -133,11 +205,13 @@ export class RoomStore {
   }
 
   async getRoom(roomId: string): Promise<RoomState | null> {
+    const kvStore = getKvStore();
     const room = await kvStore.get<RoomState>(`${ROOM_PREFIX}${roomId}`);
     return room ?? null;
   }
 
   async getRooms(): Promise<RoomSummary[]> {
+    const kvStore = getKvStore();
     const roomIds = await kvStore.smembers(ROOMS_SET_KEY);
     if (!roomIds || roomIds.length === 0) {
       return [];
@@ -162,6 +236,7 @@ export class RoomStore {
   }
 
   private async updateRoom(roomId: string, updater: (room: RoomState) => void): Promise<RoomState> {
+    const kvStore = getKvStore();
     const room = await this.getRoom(roomId);
     if (!room) {
       throw new RoomError("ROOM_NOT_FOUND", "This room does not exist or has expired.");
@@ -211,6 +286,7 @@ export class RoomStore {
   }
 
   async leaveRoom(roomId: string, clientId: string): Promise<RoomState | null> {
+    const kvStore = getKvStore();
     const room = await this.getRoom(roomId);
     if (!room) {
       return null;
@@ -375,11 +451,6 @@ function normalizeChatBody(value: string): string {
     throw new RoomError("INVALID_ROOM_MEMBER", "A message cannot be empty.");
   }
   return trimmed;
-}
-
-// Global instance to prevent multiple instances
-declare global {
-  var __syncScreenRoomsAsync: RoomStore | undefined;
 }
 
 export function getRoomStore(): RoomStore {
