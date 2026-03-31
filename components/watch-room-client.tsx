@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { signOut } from "next-auth/react";
-import { io, type Socket } from "socket.io-client";
+import Pusher from "pusher-js";
 import { saveStoredProfileName } from "@/lib/profile";
 import ThemeToggle from "@/components/theme-toggle";
 import { extractYouTubeVideoId } from "@/lib/youtube";
@@ -55,19 +55,23 @@ declare global {
   }
 }
 
-const SOCKET_PATH = "/api/socket/io";
 const TIME_DRIFT_TOLERANCE = 0.9;
 const SEEK_EMIT_THROTTLE_MS = 900;
-const JOIN_RETRY_DELAY_MS = 1500;
 const PLAYER_SUPPRESS_MS = 900;
 const SEEK_DETECTION_THRESHOLD = 1.6;
 const SYNC_INTERVAL_MS = 700;
-const SOCKET_BOOT_RETRIES = 6;
 const CHAT_TYPING_IDLE_MS = 1200;
 
 type Props = {
   roomId: string;
   viewer: Viewer;
+};
+
+type RoomChannelPayload = {
+  state: RoomStatePayload;
+  syncedBy?: string;
+  participantEvent?: RoomStatePayload["participantEvent"];
+  syncEvent?: RoomStatePayload["syncEvent"];
 };
 
 export default function WatchRoomClient({ roomId, viewer }: Props) {
@@ -85,7 +89,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatDraft, setChatDraft] = useState("");
 
-  const socketRef = useRef<Socket | null>(null);
+  const pusherRef = useRef<Pusher | null>(null);
   const playerRef = useRef<YouTubePlayer | null>(null);
   const suppressPlayerEventsRef = useRef(false);
   const lastSeekEmitAtRef = useRef(0);
@@ -100,6 +104,18 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   } | null>(null);
   const chatListRef = useRef<HTMLDivElement | null>(null);
   const typingStopTimeoutRef = useRef<number | null>(null);
+
+  const emitAction = useCallback(async (action: string, payload: Record<string, unknown> = {}) => {
+    try {
+      await fetch(`/api/rooms/${roomId}/action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, clientId, ...payload })
+      });
+    } catch (e) {
+      console.error(e);
+    }
+  }, [roomId, clientId]);
 
   function runWithSuppressedPlayerEvents(action: () => void) {
     action();
@@ -164,137 +180,78 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   }, [roomId, viewer.displayName]);
 
   useEffect(() => {
-    if (!clientId) {
-      return;
-    }
+    if (!clientId) return;
 
     let isMounted = true;
-    let joinRetryTimeout: number | null = null;
+    let pusher: Pusher;
 
-    const scheduleJoinRetry = (socket: Socket) => {
-      if (joinRetryTimeout !== null) {
-        window.clearTimeout(joinRetryTimeout);
-      }
-
-      joinRetryTimeout = window.setTimeout(() => {
-        if (!isMounted || joinedRef.current || !socket.connected) {
-          return;
-        }
-
-        setConnectionLabel("Retrying room join...");
-        socket.emit("room:join", {
-          roomId,
-          clientId,
-          userId: viewer.id,
-          displayName,
-          image: viewer.image ?? null
-        });
-        scheduleJoinRetry(socket);
-      }, JOIN_RETRY_DELAY_MS);
-    };
-
-    const boot = async () => {
+    const boot = () => {
       setConnectionLabel("Starting room connection...");
-      await ensureSocketServerReady();
 
-      const socket = io({
-        autoConnect: false,
-        path: SOCKET_PATH,
-        transports: ["polling", "websocket"],
-        reconnection: true,
-        reconnectionAttempts: 20,
-        reconnectionDelay: 800
+      pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY || "", {
+        cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER || "us2",
       });
 
-      socketRef.current = socket;
+      pusherRef.current = pusher;
+      const channel = pusher.subscribe(`room-${roomId}`);
 
-      socket.on("connect", () => {
-        if (!isMounted) {
-          return;
-        }
-
-        joinedRef.current = false;
-        setJoinError(null);
-        setInlineNotice(null);
-        setConnectionLabel("Connected. Joining room...");
-        socket.emit("room:join", {
-          roomId,
-          clientId,
-          userId: viewer.id,
-          displayName,
-          image: viewer.image ?? null
-        });
-        scheduleJoinRetry(socket);
-      });
-
-      socket.on("connect_error", () => {
-        if (!isMounted) {
-          return;
-        }
-
-        joinedRef.current = false;
-        setConnectionLabel("Room connection failed. Retrying...");
-        setJoinError("Could not connect to the room server yet. Retrying...");
-      });
-
-      socket.on("room:state", (nextState: RoomStatePayload) => {
-        if (!isMounted) {
-          return;
-        }
-
+      channel.bind("room:state", (data: RoomChannelPayload) => {
+        if (!isMounted) return;
         joinedRef.current = true;
-        if (joinRetryTimeout !== null) {
-          window.clearTimeout(joinRetryTimeout);
-          joinRetryTimeout = null;
-        }
-
+        const nextState = data.state;
         roomStateRef.current = nextState;
         setRoomState(nextState);
         setJoinError(null);
-        setInlineNotice(getRoomNotice(nextState, clientId));
-        setConnectionLabel(getPresenceMessage(nextState.participants.length));
+        setInlineNotice(getRoomNotice(data, clientId));
+        setConnectionLabel(getPresenceMessage(nextState.participants?.length || 0));
         applyRoomStateToPlayer(nextState);
       });
 
-      socket.on("room:error", (payload: RoomErrorPayload) => {
-        if (!isMounted) {
-          return;
-        }
-
+      channel.bind("room:error", (payload: RoomErrorPayload) => {
+        if (!isMounted) return;
         joinedRef.current = false;
         setConnectionLabel("Unable to join room.");
         setJoinError(payload.message);
       });
 
-      socket.on("disconnect", () => {
-        if (!isMounted) {
-          return;
-        }
+      pusher.connection.bind("connected", () => {
+        if (!isMounted) return;
+        setConnectionLabel("Connected. Joining room...");
+        emitAction("room:join", {
+           displayName,
+           image: viewer.image ?? null
+        });
+      });
 
+      pusher.connection.bind("disconnected", () => {
+        if (!isMounted) return;
         setConnectionLabel("Disconnected. Reconnecting...");
       });
 
-      socket.connect();
+      pusher.connection.bind("error", () => {
+        if (!isMounted) return;
+        setConnectionLabel("Room connection failed. Retrying...");
+        setJoinError("Could not connect to the room server yet. Retrying...");
+      });
     };
 
-    void boot().catch(() => {
-      if (!isMounted) {
-        return;
-      }
+    boot();
 
-      setConnectionLabel("Room connection failed.");
-      setJoinError("Could not start the room connection.");
-    });
+    const handleBeforeUnload = () => {
+      navigator.sendBeacon(
+        `/api/rooms/${roomId}/action`,
+        JSON.stringify({ action: "room:leave", clientId })
+      );
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
 
     return () => {
       isMounted = false;
-      if (joinRetryTimeout !== null) {
-        window.clearTimeout(joinRetryTimeout);
-      }
-      socketRef.current?.disconnect();
-      socketRef.current = null;
+      handleBeforeUnload();
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      pusher?.disconnect();
     };
-  }, [applyRoomStateToPlayer, clientId, displayName, roomId, viewer.id, viewer.image]);
+  }, [applyRoomStateToPlayer, clientId, displayName, roomId, viewer.image, emitAction]);
 
   useEffect(() => {
     let cancelled = false;
@@ -318,7 +275,6 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           },
           onStateChange: (event) => {
             if (
-              !socketRef.current ||
               !joinedRef.current ||
               suppressPlayerEventsRef.current ||
               !playerReadyRef.current ||
@@ -329,9 +285,9 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
             const currentTimeSeconds = event.target.getCurrentTime();
             if (event.data === window.YT?.PlayerState.PLAYING) {
-              socketRef.current.emit("playback:play", { roomId, clientId, currentTimeSeconds });
+              emitAction("playback:play", { currentTimeSeconds });
             } else if (event.data === window.YT?.PlayerState.PAUSED) {
-              socketRef.current.emit("playback:pause", { roomId, clientId, currentTimeSeconds });
+              emitAction("playback:pause", { currentTimeSeconds });
             }
           }
         }
@@ -344,10 +300,10 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       playerRef.current?.destroy();
       playerRef.current = null;
     };
-  }, [applyRoomStateToPlayer, clientId, roomId]);
+  }, [applyRoomStateToPlayer, emitAction]);
 
   useEffect(() => {
-    if (!playerRef.current || !socketRef.current || !joinedRef.current || !playerReadyRef.current) {
+    if (!playerRef.current || !joinedRef.current || !playerReadyRef.current) {
       return;
     }
 
@@ -355,7 +311,6 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       if (
         !roomState ||
         !playerRef.current ||
-        !socketRef.current ||
         suppressPlayerEventsRef.current ||
         typeof playerRef.current.getCurrentTime !== "function"
       ) {
@@ -382,7 +337,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
           if (Math.abs(actualDelta - expectedDelta) > SEEK_DETECTION_THRESHOLD) {
             lastSeekEmitAtRef.current = now;
-            socketRef.current.emit("playback:seek", { roomId, clientId, currentTimeSeconds });
+            emitAction("playback:seek", { currentTimeSeconds });
           }
         }
       } else if (driftSeconds > 0.35) {
@@ -403,7 +358,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       window.clearInterval(intervalId);
       playbackSnapshotRef.current = null;
     };
-  }, [applyRoomStateToPlayer, clientId, roomId, roomState]);
+  }, [clientId, roomId, roomState, emitAction]);
 
   useEffect(() => {
     if (!roomState || !playerRef.current || !playerReadyRef.current) {
@@ -423,7 +378,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   }, [isChatOpen, roomState?.chatMessages]);
 
   useEffect(() => {
-    if (!isChatOpen || !roomState?.chatMessages.length || !socketRef.current?.connected || !joinedRef.current) {
+    if (!isChatOpen || !roomState?.chatMessages.length || !joinedRef.current) {
       return;
     }
 
@@ -438,12 +393,8 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       return;
     }
 
-    socketRef.current.emit("chat:read", {
-      roomId,
-      clientId,
-      messageId: latestUnread.id
-    });
-  }, [clientId, isChatOpen, roomId, roomState?.chatMessages]);
+    emitAction("chat:read", { messageId: latestUnread.id });
+  }, [clientId, isChatOpen, roomState?.chatMessages, emitAction]);
 
   useEffect(() => {
     return () => {
@@ -454,7 +405,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   }, []);
 
   function submitVideo() {
-    if (!joinedRef.current || !socketRef.current?.connected) {
+    if (!joinedRef.current) {
       setInlineNotice(null);
       setInlineError("Room is still connecting. Wait for the room status to show connected.");
       return;
@@ -469,7 +420,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
     setInlineError(null);
     setInlineNotice("Sending video to the room...");
-    socketRef.current.emit("video:set", { roomId, clientId, videoId });
+    emitAction("video:set", { videoId });
     setInputUrl("");
   }
 
@@ -489,30 +440,46 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     setInlineNotice("Updated your display name. Refreshing room presence...");
     setIsProfileOpen(false);
 
-    if (socketRef.current) {
-      joinedRef.current = false;
-      setJoinError(null);
-      setConnectionLabel("Refreshing your room profile...");
-      socketRef.current.disconnect();
-      socketRef.current.connect();
-    }
+    joinedRef.current = false;
+    setJoinError(null);
+    setConnectionLabel("Refreshing your room profile...");
+    emitAction("room:join", {
+      displayName: storedName,
+      image: viewer.image ?? null
+    });
   }
 
   function submitChatMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = chatDraft.trim();
-    if (!value || !socketRef.current?.connected || !joinedRef.current) {
+    if (!value || !joinedRef.current) {
       return;
     }
 
     setTypingState(false);
-    socketRef.current.emit("chat:message", {
-      roomId,
-      clientId,
-      body: value
-    });
+    emitAction("chat:message", { body: value });
     setChatDraft("");
     setIsChatOpen(true);
+  }
+
+  function setTypingState(isTyping: boolean) {
+    if (!joinedRef.current) {
+      return;
+    }
+
+    emitAction("chat:typing", { isTyping });
+
+    if (typingStopTimeoutRef.current !== null) {
+      window.clearTimeout(typingStopTimeoutRef.current);
+      typingStopTimeoutRef.current = null;
+    }
+
+    if (isTyping) {
+      typingStopTimeoutRef.current = window.setTimeout(() => {
+        emitAction("chat:typing", { isTyping: false });
+        typingStopTimeoutRef.current = null;
+      }, CHAT_TYPING_IDLE_MS);
+    }
   }
 
   const participants = roomState?.participants ?? [];
@@ -781,34 +748,6 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       </div>
     </main>
   );
-
-  function setTypingState(isTyping: boolean) {
-    if (!socketRef.current?.connected || !joinedRef.current) {
-      return;
-    }
-
-    socketRef.current.emit("chat:typing", {
-      roomId,
-      clientId,
-      isTyping
-    });
-
-    if (typingStopTimeoutRef.current !== null) {
-      window.clearTimeout(typingStopTimeoutRef.current);
-      typingStopTimeoutRef.current = null;
-    }
-
-    if (isTyping) {
-      typingStopTimeoutRef.current = window.setTimeout(() => {
-        socketRef.current?.emit("chat:typing", {
-          roomId,
-          clientId,
-          isTyping: false
-        });
-        typingStopTimeoutRef.current = null;
-      }, CHAT_TYPING_IDLE_MS);
-    }
-  }
 }
 
 function ProfileAvatar({ viewer }: { viewer: Viewer }) {
@@ -877,37 +816,32 @@ function getTypingLabel(names: string[]) {
   if (names.length === 1) {
     return `${names[0]} is typing...`;
   }
-
   return `${names[0]} and ${names.length - 1} other${names.length > 2 ? "s" : ""} are typing...`;
 }
 
 function getPresenceMessage(count: number): string {
-  if (count >= 2) {
-    return "Both participants connected.";
-  }
-
+  if (count >= 2) return "Both participants connected.";
   return "Waiting for the second participant...";
 }
 
-function getRoomNotice(roomState: RoomStatePayload, clientId: string): string | null {
-  if (roomState.syncEvent === "video:set" && roomState.videoId) {
+function getRoomNotice(roomStatePayload: RoomChannelPayload, clientId: string): string | null {
+  const roomState = roomStatePayload.state;
+  if (roomStatePayload.syncEvent === "video:set" && roomState.videoId) {
     return `Synced video ${roomState.videoId}`;
   }
 
-  if (roomState.syncEvent === "participant:update" && roomState.participantEvent) {
+  if (roomStatePayload.syncEvent === "participant:update" && roomStatePayload.participantEvent) {
     const actor =
-      roomState.syncedBy === clientId ? "You" : roomState.participantEvent.name;
+      roomStatePayload.syncedBy === clientId ? "You" : roomStatePayload.participantEvent.name;
 
-    if (roomState.participantEvent.action === "joined") {
+    if (roomStatePayload.participantEvent.action === "joined") {
       return `${actor} joined the room.`;
     }
-
-    if (roomState.participantEvent.action === "left") {
+    if (roomStatePayload.participantEvent.action === "left") {
       return `${actor} left the room.`;
     }
-
-    if (roomState.participantEvent.action === "updated") {
-      return roomState.syncedBy === clientId
+    if (roomStatePayload.participantEvent.action === "updated") {
+      return roomStatePayload.syncedBy === clientId
         ? "Your display name was updated."
         : `${actor} updated their display name.`;
     }
@@ -939,10 +873,7 @@ function getOrCreateClientId(roomId: string): string {
 }
 
 async function loadYouTubeApi(): Promise<void> {
-  if (window.YT?.Player) {
-    return;
-  }
-
+  if (window.YT?.Player) return;
   await new Promise<void>((resolve) => {
     const existingScript = document.querySelector('script[data-youtube-api="true"]');
     if (existingScript) {
@@ -953,7 +884,6 @@ async function loadYouTubeApi(): Promise<void> {
       };
       return;
     }
-
     const script = document.createElement("script");
     script.src = "https://www.youtube.com/iframe_api";
     script.async = true;
@@ -963,35 +893,10 @@ async function loadYouTubeApi(): Promise<void> {
   });
 }
 
-async function ensureSocketServerReady(): Promise<void> {
-  let lastError: unknown = null;
-
-  for (let attempt = 0; attempt < SOCKET_BOOT_RETRIES; attempt += 1) {
-    try {
-      const response = await fetch("/api/socket", {
-        cache: "no-store"
-      });
-
-      if (response.ok) {
-        return;
-      }
-
-      lastError = new Error(`Socket bootstrap returned ${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-
-    await new Promise((resolve) => window.setTimeout(resolve, 450));
-  }
-
-  throw lastError instanceof Error ? lastError : new Error("Socket bootstrap failed.");
-}
-
 function getExpectedRoomTime(roomState: RoomStatePayload): number {
   if (roomState.playbackState !== "playing") {
     return roomState.currentTimeSeconds;
   }
-
   const elapsedSeconds = (Date.now() - roomState.updatedAt) / 1000;
   return Math.max(0, roomState.currentTimeSeconds + elapsedSeconds);
 }

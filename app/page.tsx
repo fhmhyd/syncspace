@@ -32,7 +32,7 @@ export default async function HomePage({
     <HomeClient
       callbackUrl={callbackUrl}
       viewer={viewer}
-      initialRooms={getRoomStore().getRooms()}
+      initialRooms={await getRoomStore().getRooms()}
     />
   );
 }

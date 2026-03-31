@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { kv } from "@vercel/kv";
 
 export type PlaybackState = "playing" | "paused";
 
@@ -58,10 +59,56 @@ export class RoomError extends Error {
   }
 }
 
-class RoomStore {
-  private readonly rooms = new Map<string, RoomState>();
+const ROOM_PREFIX = "syncscreen:room:";
+const ROOMS_SET_KEY = "syncscreen:active_rooms";
 
-  createRoom(input: { title: string; ownerName: string; ownerUserId: string }): RoomState {
+const useKv = Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+
+interface KvLike {
+  set(key: string, value: unknown, opts?: { ex?: number }): Promise<unknown>;
+  get<T>(key: string): Promise<T | null>;
+  del(key: string): Promise<unknown>;
+  smembers(key: string): Promise<string[]>;
+  sadd(key: string, member: string): Promise<unknown>;
+  srem(key: string, member: string): Promise<unknown>;
+}
+
+class MemoryKv implements KvLike {
+  private readonly map = new Map<string, string>();
+  private readonly sets = new Map<string, Set<string>>();
+
+  async set(key: string, value: unknown): Promise<void> {
+    this.map.set(key, JSON.stringify(value));
+  }
+
+  async get<T>(key: string): Promise<T | null> {
+    const raw = this.map.get(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  }
+
+  async del(key: string): Promise<void> {
+    this.map.delete(key);
+  }
+
+  async smembers(key: string): Promise<string[]> {
+    return [...(this.sets.get(key) ?? new Set())];
+  }
+
+  async sadd(key: string, member: string): Promise<void> {
+    const set = this.sets.get(key) ?? new Set<string>();
+    set.add(member);
+    this.sets.set(key, set);
+  }
+
+  async srem(key: string, member: string): Promise<void> {
+    this.sets.get(key)?.delete(member);
+  }
+}
+
+const kvStore: KvLike = useKv ? kv : new MemoryKv();
+
+export class RoomStore {
+  async createRoom(input: { title: string; ownerName: string; ownerUserId: string }): Promise<RoomState> {
     const roomId = randomUUID().slice(0, 8);
     const createdAt = Date.now();
     const room: RoomState = {
@@ -80,17 +127,28 @@ class RoomStore {
       typingParticipants: []
     };
 
-    this.rooms.set(roomId, room);
+    await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: 60 * 60 * 24 });
+    await kvStore.sadd(ROOMS_SET_KEY, roomId);
     return room;
   }
 
-  getRoom(roomId: string): RoomState | null {
-    const room = this.rooms.get(roomId);
-    return room ? structuredClone(room) : null;
+  async getRoom(roomId: string): Promise<RoomState | null> {
+    const room = await kvStore.get<RoomState>(`${ROOM_PREFIX}${roomId}`);
+    return room ?? null;
   }
 
-  getRooms(): RoomSummary[] {
-    return [...this.rooms.values()]
+  async getRooms(): Promise<RoomSummary[]> {
+    const roomIds = await kvStore.smembers(ROOMS_SET_KEY);
+    if (!roomIds || roomIds.length === 0) {
+      return [];
+    }
+
+    const rooms = await Promise.all(
+      roomIds.map((id) => kvStore.get<RoomState>(`${ROOM_PREFIX}${id}`))
+    );
+    const activeRooms = rooms.filter((room): room is RoomState => room !== null);
+
+    return activeRooms
       .sort((left, right) => right.updatedAt - left.updatedAt)
       .map((room) => ({
         roomId: room.roomId,
@@ -99,59 +157,61 @@ class RoomStore {
         ownerUserId: room.ownerUserId,
         updatedAt: room.updatedAt,
         createdAt: room.createdAt,
-        participants: structuredClone(room.participants)
+        participants: room.participants || []
       }));
   }
 
-  joinRoom(roomId: string, participant: Participant): RoomState {
-    const room = this.rooms.get(roomId);
+  private async updateRoom(roomId: string, updater: (room: RoomState) => void): Promise<RoomState> {
+    const room = await this.getRoom(roomId);
     if (!room) {
       throw new RoomError("ROOM_NOT_FOUND", "This room does not exist or has expired.");
     }
-
-    const normalizedName = participant.name.trim();
-    if (!normalizedName) {
-      throw new RoomError("INVALID_ROOM_MEMBER", "A display name is required to join the room.");
-    }
-
-    const existing = room.participants.find((entry) => entry.clientId === participant.clientId);
-    if (!existing && room.participants.length >= 2) {
-      throw new RoomError("ROOM_FULL", "This room already has two participants.");
-    }
-
-    if (existing) {
-      room.participants = room.participants.map((entry) =>
-        entry.clientId === participant.clientId
-          ? {
-              ...entry,
-              socketId: participant.socketId,
-              name: normalizedName,
-              image: participant.image ?? null
-            }
-          : entry
-      );
-    } else {
-      room.participants = [
-        ...room.participants,
-        {
-          ...participant,
-          name: normalizedName
-        }
-      ];
-    }
-    room.typingParticipants = room.typingParticipants.filter(
-      (entry) => entry.clientId !== participant.clientId
-    );
-    if (!room.ownerClientId) {
-      room.ownerClientId = participant.clientId;
-    }
+    updater(room);
     room.updatedAt = Date.now();
-
-    return structuredClone(room);
+    await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: 60 * 60 * 24 });
+    return room;
   }
 
-  leaveRoom(roomId: string, clientId: string): RoomState | null {
-    const room = this.rooms.get(roomId);
+  async joinRoom(roomId: string, participant: Participant): Promise<RoomState> {
+    return this.updateRoom(roomId, (room) => {
+      const normalizedName = participant.name.trim();
+      if (!normalizedName) {
+        throw new RoomError("INVALID_ROOM_MEMBER", "A display name is required to join the room.");
+      }
+
+      const existing = room.participants.find((entry) => entry.clientId === participant.clientId);
+      if (!existing && room.participants.length >= 2) {
+        throw new RoomError("ROOM_FULL", "This room already has two participants.");
+      }
+
+      if (existing) {
+        room.participants = room.participants.map((entry) =>
+          entry.clientId === participant.clientId
+            ? {
+                ...entry,
+                socketId: participant.socketId,
+                name: normalizedName,
+                image: participant.image ?? null
+              }
+            : entry
+        );
+      } else {
+        room.participants.push({
+          ...participant,
+          name: normalizedName
+        });
+      }
+      room.typingParticipants = room.typingParticipants.filter(
+        (entry) => entry.clientId !== participant.clientId
+      );
+      if (!room.ownerClientId) {
+        room.ownerClientId = participant.clientId;
+      }
+    });
+  }
+
+  async leaveRoom(roomId: string, clientId: string): Promise<RoomState | null> {
+    const room = await this.getRoom(roomId);
     if (!room) {
       return null;
     }
@@ -164,56 +224,57 @@ class RoomStore {
     room.updatedAt = Date.now();
 
     if (room.participants.length === 0) {
-      this.rooms.delete(roomId);
+      await kvStore.del(`${ROOM_PREFIX}${roomId}`);
+      await kvStore.srem(ROOMS_SET_KEY, roomId);
       return null;
     }
 
-    return structuredClone(room);
+    await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: 60 * 60 * 24 });
+    return room;
   }
 
-  updateVideo(roomId: string, clientId: string, videoId: string): RoomState {
-    const room = this.requireMember(roomId, clientId);
-    room.videoId = videoId;
-    room.playbackState = "playing";
-    room.currentTimeSeconds = 0;
-    room.updatedAt = Date.now();
-    return structuredClone(room);
+  async updateVideo(roomId: string, clientId: string, videoId: string): Promise<RoomState> {
+    return this.updateRoom(roomId, (room) => {
+      this.requireMember(room, clientId);
+      room.videoId = videoId;
+      room.playbackState = "playing";
+      room.currentTimeSeconds = 0;
+    });
   }
 
-  play(roomId: string, clientId: string, currentTimeSeconds: number): RoomState {
-    const room = this.requireMember(roomId, clientId);
-    room.playbackState = "playing";
-    room.currentTimeSeconds = clampTime(currentTimeSeconds);
-    room.updatedAt = Date.now();
-    return structuredClone(room);
+  async play(roomId: string, clientId: string, currentTimeSeconds: number): Promise<RoomState> {
+    return this.updateRoom(roomId, (room) => {
+      this.requireMember(room, clientId);
+      room.playbackState = "playing";
+      room.currentTimeSeconds = clampTime(currentTimeSeconds);
+    });
   }
 
-  pause(roomId: string, clientId: string, currentTimeSeconds: number): RoomState {
-    const room = this.requireMember(roomId, clientId);
-    room.playbackState = "paused";
-    room.currentTimeSeconds = clampTime(currentTimeSeconds);
-    room.updatedAt = Date.now();
-    return structuredClone(room);
+  async pause(roomId: string, clientId: string, currentTimeSeconds: number): Promise<RoomState> {
+    return this.updateRoom(roomId, (room) => {
+      this.requireMember(room, clientId);
+      room.playbackState = "paused";
+      room.currentTimeSeconds = clampTime(currentTimeSeconds);
+    });
   }
 
-  seek(roomId: string, clientId: string, currentTimeSeconds: number): RoomState {
-    const room = this.requireMember(roomId, clientId);
-    room.currentTimeSeconds = clampTime(currentTimeSeconds);
-    room.updatedAt = Date.now();
-    return structuredClone(room);
+  async seek(roomId: string, clientId: string, currentTimeSeconds: number): Promise<RoomState> {
+    return this.updateRoom(roomId, (room) => {
+      this.requireMember(room, clientId);
+      room.currentTimeSeconds = clampTime(currentTimeSeconds);
+    });
   }
 
-  addChatMessage(roomId: string, clientId: string, body: string): RoomState {
-    const room = this.requireMember(roomId, clientId);
-    const participant = room.participants.find((entry) => entry.clientId === clientId);
-    if (!participant) {
-      throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
-    }
+  async addChatMessage(roomId: string, clientId: string, body: string): Promise<RoomState> {
+    return this.updateRoom(roomId, (room) => {
+      this.requireMember(room, clientId);
+      const participant = room.participants.find((entry) => entry.clientId === clientId);
+      if (!participant) {
+        throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
+      }
 
-    const normalizedBody = normalizeChatBody(body);
-    room.chatMessages = [
-      ...room.chatMessages,
-      {
+      const normalizedBody = normalizeChatBody(body);
+      room.chatMessages.push({
         id: randomUUID(),
         clientId,
         authorName: participant.name,
@@ -221,79 +282,67 @@ class RoomStore {
         body: normalizedBody,
         sentAt: Date.now(),
         readByClientIds: [clientId]
-      }
-    ].slice(-100);
-    room.typingParticipants = room.typingParticipants.filter((entry) => entry.clientId !== clientId);
-    room.updatedAt = Date.now();
-    return structuredClone(room);
-  }
-
-  markChatRead(roomId: string, clientId: string, messageId?: string): RoomState {
-    const room = this.requireMember(roomId, clientId);
-    if (room.chatMessages.length === 0) {
-      return structuredClone(room);
-    }
-
-    const targetIndex = messageId
-      ? room.chatMessages.findIndex((message) => message.id === messageId)
-      : room.chatMessages.length - 1;
-
-    if (targetIndex < 0) {
-      return structuredClone(room);
-    }
-
-    room.chatMessages = room.chatMessages.map((message, index) => {
-      if (index > targetIndex || message.readByClientIds.includes(clientId)) {
-        return message;
-      }
-
-      return {
-        ...message,
-        readByClientIds: [...message.readByClientIds, clientId]
-      };
+      });
+      room.chatMessages = room.chatMessages.slice(-100);
+      room.typingParticipants = room.typingParticipants.filter((entry) => entry.clientId !== clientId);
     });
-    room.updatedAt = Date.now();
-    return structuredClone(room);
   }
 
-  setTyping(roomId: string, clientId: string, isTyping: boolean): RoomState {
-    const room = this.requireMember(roomId, clientId);
-    const participant = room.participants.find((entry) => entry.clientId === clientId);
-    if (!participant) {
-      throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
-    }
+  async markChatRead(roomId: string, clientId: string, messageId?: string): Promise<RoomState> {
+    return this.updateRoom(roomId, (room) => {
+      this.requireMember(room, clientId);
+      if (room.chatMessages.length === 0) {
+        return;
+      }
 
-    if (isTyping) {
-      const existing = room.typingParticipants.find((entry) => entry.clientId === clientId);
-      if (!existing) {
-        room.typingParticipants = [
-          ...room.typingParticipants,
-          {
+      const targetIndex = messageId
+        ? room.chatMessages.findIndex((message) => message.id === messageId)
+        : room.chatMessages.length - 1;
+
+      if (targetIndex < 0) {
+        return;
+      }
+
+      room.chatMessages = room.chatMessages.map((message, index) => {
+        if (index > targetIndex || message.readByClientIds.includes(clientId)) {
+          return message;
+        }
+
+        return {
+          ...message,
+          readByClientIds: [...message.readByClientIds, clientId]
+        };
+      });
+    });
+  }
+
+  async setTyping(roomId: string, clientId: string, isTyping: boolean): Promise<RoomState> {
+    return this.updateRoom(roomId, (room) => {
+      this.requireMember(room, clientId);
+      const participant = room.participants.find((entry) => entry.clientId === clientId);
+      if (!participant) {
+        throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
+      }
+
+      if (isTyping) {
+        const existing = room.typingParticipants.find((entry) => entry.clientId === clientId);
+        if (!existing) {
+          room.typingParticipants.push({
             clientId,
             name: participant.name
-          }
-        ];
+          });
+        }
+      } else {
+        room.typingParticipants = room.typingParticipants.filter((entry) => entry.clientId !== clientId);
       }
-    } else {
-      room.typingParticipants = room.typingParticipants.filter((entry) => entry.clientId !== clientId);
-    }
-
-    room.updatedAt = Date.now();
-    return structuredClone(room);
+    });
   }
 
-  private requireMember(roomId: string, clientId: string): RoomState {
-    const room = this.rooms.get(roomId);
-    if (!room) {
-      throw new RoomError("ROOM_NOT_FOUND", "This room does not exist or has expired.");
-    }
-
-    const isMember = room.participants.some((entry) => entry.clientId === clientId);
+  private requireMember(room: RoomState, clientId: string): void {
+    const isMember = (room.participants || []).some((entry) => entry.clientId === clientId);
     if (!isMember) {
       throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
     }
-
-    return room;
   }
 }
 
@@ -301,7 +350,6 @@ function clampTime(value: number): number {
   if (!Number.isFinite(value) || value < 0) {
     return 0;
   }
-
   return Number(value.toFixed(2));
 }
 
@@ -310,7 +358,6 @@ function normalizeRoomTitle(value: string): string {
   if (!trimmed) {
     throw new RoomError("INVALID_ROOM_MEMBER", "A room title is required.");
   }
-
   return trimmed;
 }
 
@@ -319,7 +366,6 @@ function normalizeRoomOwner(value: string): string {
   if (!trimmed) {
     throw new RoomError("INVALID_ROOM_MEMBER", "An owner name is required.");
   }
-
   return trimmed;
 }
 
@@ -328,18 +374,17 @@ function normalizeChatBody(value: string): string {
   if (!trimmed) {
     throw new RoomError("INVALID_ROOM_MEMBER", "A message cannot be empty.");
   }
-
   return trimmed;
 }
 
+// Global instance to prevent multiple instances
 declare global {
-  var __syncScreenRooms: RoomStore | undefined;
+  var __syncScreenRoomsAsync: RoomStore | undefined;
 }
 
 export function getRoomStore(): RoomStore {
-  if (!global.__syncScreenRooms) {
-    global.__syncScreenRooms = new RoomStore();
+  if (!global.__syncScreenRoomsAsync) {
+    global.__syncScreenRoomsAsync = new RoomStore();
   }
-
-  return global.__syncScreenRooms;
+  return global.__syncScreenRoomsAsync;
 }

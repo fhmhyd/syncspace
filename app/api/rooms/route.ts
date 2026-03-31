@@ -23,7 +23,7 @@ export async function POST(request: Request) {
     session.user.googleName
   );
 
-  const room = getRoomStore().createRoom({
+  const room = await getRoomStore().createRoom({
     title,
     ownerName,
     ownerUserId: session.user.id

@@ -3,3 +3,6 @@ node_modules
 tsconfig.tsbuildinfo
 .env.local
 .env*.local
+.devserver*.log
+auth-cookies.txt
+local-auth-cookies.txt
