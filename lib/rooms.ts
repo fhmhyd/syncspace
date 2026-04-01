@@ -40,6 +40,7 @@ export type RoomState = {
   currentTimeSeconds: number;
   updatedAt: number;
   createdAt: number;
+  emptySinceAt?: number | null;
   participants: Participant[];
   chatMessages: ChatMessage[];
   typingParticipants: TypingParticipant[];
@@ -66,6 +67,7 @@ const ROOM_PREFIX = "syncscreen:room:";
 const ROOMS_SET_KEY = "syncscreen:active_rooms";
 const ROOM_TTL_SECONDS = 60 * 60 * 24;
 const PARTICIPANT_STALE_MS = 25_000;
+const EMPTY_ROOM_GRACE_MS = 2 * 60_000;
 
 const useKv = Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
 const useRedisUrl = Boolean(process.env.REDIS_URL);
@@ -198,6 +200,7 @@ export class RoomStore {
       currentTimeSeconds: 0,
       updatedAt: createdAt,
       createdAt,
+      emptySinceAt: null,
       participants: [],
       chatMessages: [],
       typingParticipants: []
@@ -215,7 +218,12 @@ export class RoomStore {
       return null;
     }
 
-    const { room: cleanedRoom, changed } = cleanupRoomPresence(room);
+    const { room: cleanedRoom, changed, shouldDelete } = cleanupRoomPresence(room);
+    if (shouldDelete) {
+      await kvStore.del(`${ROOM_PREFIX}${roomId}`);
+      await kvStore.srem(ROOMS_SET_KEY, roomId);
+      return null;
+    }
     if (changed) {
       await kvStore.set(`${ROOM_PREFIX}${roomId}`, cleanedRoom, { ex: ROOM_TTL_SECONDS });
     }
@@ -230,9 +238,7 @@ export class RoomStore {
       return [];
     }
 
-    const rooms = await Promise.all(
-      roomIds.map((id) => kvStore.get<RoomState>(`${ROOM_PREFIX}${id}`))
-    );
+    const rooms = await Promise.all(roomIds.map((id) => this.getRoom(id)));
     const activeRooms = rooms.filter((room): room is RoomState => room !== null);
 
     return activeRooms
@@ -300,6 +306,7 @@ export class RoomStore {
           name: normalizedName
         });
       }
+      room.emptySinceAt = null;
       room.typingParticipants = room.typingParticipants.filter(
         (entry) => entry.clientId !== participant.clientId
       );
@@ -349,6 +356,7 @@ export class RoomStore {
     if (room.ownerClientId === clientId) {
       room.ownerClientId = room.participants[0]?.clientId ?? null;
     }
+    room.emptySinceAt = room.participants.length === 0 ? Date.now() : null;
     room.updatedAt = Date.now();
 
     await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: ROOM_TTL_SECONDS });
@@ -468,12 +476,15 @@ export class RoomStore {
   }
 }
 
-function cleanupRoomPresence(room: RoomState): { room: RoomState; changed: boolean } {
+function cleanupRoomPresence(
+  room: RoomState
+): { room: RoomState; changed: boolean; shouldDelete: boolean } {
+  const now = Date.now();
   const activeParticipants = room.participants.filter((participant) => {
     if (!Number.isFinite(participant.lastSeenAt)) {
       return false;
     }
-    return Date.now() - participant.lastSeenAt <= PARTICIPANT_STALE_MS;
+    return now - participant.lastSeenAt <= PARTICIPANT_STALE_MS;
   });
   const removedClientIds = new Set(
     room.participants
@@ -481,7 +492,7 @@ function cleanupRoomPresence(room: RoomState): { room: RoomState; changed: boole
         if (!Number.isFinite(participant.lastSeenAt)) {
           return true;
         }
-        return Date.now() - participant.lastSeenAt > PARTICIPANT_STALE_MS;
+        return now - participant.lastSeenAt > PARTICIPANT_STALE_MS;
       })
       .map((participant) => participant.clientId)
   );
@@ -495,21 +506,30 @@ function cleanupRoomPresence(room: RoomState): { room: RoomState; changed: boole
   const nextTypingParticipants = room.typingParticipants.filter(
     (participant) => !removedClientIds.has(participant.clientId)
   );
+  const nextEmptySinceAt =
+    activeParticipants.length === 0 ? room.emptySinceAt ?? now : null;
+  const shouldDelete =
+    activeParticipants.length === 0 &&
+    Number.isFinite(nextEmptySinceAt) &&
+    now - (nextEmptySinceAt as number) >= EMPTY_ROOM_GRACE_MS;
 
   const changed =
     activeParticipants.length !== room.participants.length ||
     nextOwnerClientId !== room.ownerClientId ||
-    nextTypingParticipants.length !== room.typingParticipants.length;
+    nextTypingParticipants.length !== room.typingParticipants.length ||
+    (room.emptySinceAt ?? null) !== nextEmptySinceAt;
 
   if (!changed) {
-    return { room, changed: false };
+    return { room, changed: false, shouldDelete };
   }
 
   return {
     changed: true,
+    shouldDelete,
     room: {
       ...room,
       ownerClientId: nextOwnerClientId,
+      emptySinceAt: nextEmptySinceAt,
       participants: activeParticipants,
       typingParticipants: nextTypingParticipants
     }

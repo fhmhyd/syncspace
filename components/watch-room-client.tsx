@@ -55,12 +55,13 @@ declare global {
   }
 }
 
-const TIME_DRIFT_TOLERANCE = 0.9;
-const PLAYBACK_APPLY_TOLERANCE = 0.45;
-const SEEK_EMIT_THROTTLE_MS = 900;
+const TIME_DRIFT_TOLERANCE = 0.65;
+const PLAYBACK_APPLY_TOLERANCE = 0.35;
+const SEEK_EMIT_THROTTLE_MS = 500;
 const PLAYER_SUPPRESS_MS = 900;
-const SEEK_DETECTION_THRESHOLD = 1.6;
-const SYNC_INTERVAL_MS = 700;
+const SEEK_DETECTION_THRESHOLD = 0.9;
+const PAUSED_SEEK_DETECTION_THRESHOLD = 0.45;
+const SYNC_INTERVAL_MS = 350;
 const CHAT_TYPING_IDLE_MS = 1200;
 const PRESENCE_HEARTBEAT_MS = 10_000;
 
@@ -362,6 +363,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       const expectedTimeSeconds = getExpectedRoomTime(roomState);
       const now = Date.now();
       const driftSeconds = Math.abs(currentTimeSeconds - expectedTimeSeconds);
+      const previousSnapshot = playbackSnapshotRef.current;
 
       if (roomState.playbackState === "playing") {
         if (driftSeconds > TIME_DRIFT_TOLERANCE) {
@@ -371,7 +373,6 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           });
         }
 
-        const previousSnapshot = playbackSnapshotRef.current;
         if (previousSnapshot && now - lastSeekEmitAtRef.current >= SEEK_EMIT_THROTTLE_MS) {
           const actualDelta = currentTimeSeconds - previousSnapshot.currentTimeSeconds;
           const expectedDelta = expectedTimeSeconds - previousSnapshot.expectedTimeSeconds;
@@ -381,11 +382,23 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
             emitAction("playback:seek", { currentTimeSeconds });
           }
         }
-      } else if (driftSeconds > 0.35) {
-        runWithSuppressedPlayerEvents(() => {
-          playerRef.current?.seekTo(expectedTimeSeconds, true);
-          playerRef.current?.pauseVideo();
-        });
+      } else {
+        if (driftSeconds > PLAYBACK_APPLY_TOLERANCE) {
+          runWithSuppressedPlayerEvents(() => {
+            playerRef.current?.seekTo(expectedTimeSeconds, true);
+            playerRef.current?.pauseVideo();
+          });
+        }
+
+        if (
+          previousSnapshot &&
+          now - lastSeekEmitAtRef.current >= SEEK_EMIT_THROTTLE_MS &&
+          Math.abs(currentTimeSeconds - previousSnapshot.currentTimeSeconds) >
+            PAUSED_SEEK_DETECTION_THRESHOLD
+        ) {
+          lastSeekEmitAtRef.current = now;
+          emitAction("playback:seek", { currentTimeSeconds });
+        }
       }
 
       playbackSnapshotRef.current = {
