@@ -143,6 +143,11 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     issuedAt: number;
   } | null>(null);
   const lastDirectPlaybackEventRef = useRef<string | null>(null);
+  const canControlPlayback =
+    !roomState?.videoId ||
+    !roomState.playbackControllerUserId ||
+    roomState.playbackControllerUserId === viewer.id ||
+    roomState.playbackControllerClientId === clientId;
 
   const emitAction = useCallback(async (action: string, payload: Record<string, unknown> = {}) => {
     try {
@@ -462,6 +467,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           onStateChange: (event) => {
             if (
               !joinedRef.current ||
+              !canControlPlayback ||
               suppressPlayerEventsRef.current ||
               !playerReadyRef.current ||
               typeof event.target.getCurrentTime !== "function"
@@ -502,7 +508,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       playerRef.current?.destroy();
       playerRef.current = null;
     };
-  }, [applyRoomStateToPlayer, clientId, emitAction]);
+  }, [applyRoomStateToPlayer, canControlPlayback, clientId, emitAction]);
 
   useEffect(() => {
     if (!playerRef.current || !joinedRef.current || !playerReadyRef.current) {
@@ -512,6 +518,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     const intervalId = window.setInterval(() => {
       if (
         !roomState ||
+        !canControlPlayback ||
         !playerRef.current ||
         suppressPlayerEventsRef.current ||
         typeof playerRef.current.getCurrentTime !== "function"
@@ -609,7 +616,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       window.clearInterval(intervalId);
       playbackSnapshotRef.current = null;
     };
-  }, [clientId, roomId, roomState, emitAction]);
+  }, [canControlPlayback, clientId, roomId, roomState, emitAction]);
 
   useEffect(() => {
     if (!roomState || !playerRef.current || !playerReadyRef.current) {
@@ -793,7 +800,6 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   }
 
   const participants = roomState?.participants ?? [];
-  const isOwner = roomState?.ownerUserId === viewer.id;
   const indicatorClass = participants.length >= 2 ? "success" : joinError ? "danger" : "";
   const visibleChatMessages = roomState?.chatMessages ?? [];
   const unreadCount = visibleChatMessages.filter(
@@ -858,26 +864,13 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
               Signed in as {displayName} - {viewer.email ?? viewer.googleName}
             </span>
             <span className="status-pill">
-              <span className={`status-dot ${roomState?.playbackControlMode === "owner" ? "success" : ""}`} />
-              {roomState?.playbackControlMode === "owner"
-                ? "Host controls playback"
-                : "Shared playback control"}
+              <span className={`status-dot ${canControlPlayback ? "success" : ""}`} />
+              {roomState?.playbackControllerName
+                ? canControlPlayback
+                  ? "You control this video"
+                  : `${roomState.playbackControllerName} controls this video`
+                : "Sync a video to take control"}
             </span>
-            {isOwner ? (
-              <button
-                className="button-secondary"
-                type="button"
-                onClick={() =>
-                  emitAction("playback:mode", {
-                    mode: roomState?.playbackControlMode === "owner" ? "shared" : "owner"
-                  })
-                }
-              >
-                {roomState?.playbackControlMode === "owner"
-                  ? "Switch to shared control"
-                  : "Switch to host control"}
-              </button>
-            ) : null}
           </div>
           {inlineError ? <span className="error-text small room-inline-message">{inlineError}</span> : null}
           {inlineNotice ? <span className="small muted room-inline-message">{inlineNotice}</span> : null}
@@ -887,6 +880,17 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           <div className="video-shell">
             <div className="player-stage">
               <div id="youtube-player" />
+              {roomState?.videoId && !canControlPlayback ? (
+                <div className="video-placeholder">
+                  <div>
+                    <h2 style={{ marginTop: 0 }}>Viewer mode</h2>
+                    <p className="muted">
+                      {roomState.playbackControllerName ?? "The current controller"} is controlling this
+                      video. Paste a YouTube link and press Sync video to take over with your own video.
+                    </p>
+                  </div>
+                </div>
+              ) : null}
             </div>
             {!roomState?.videoId ? (
               <div className="video-placeholder">

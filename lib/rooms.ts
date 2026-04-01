@@ -48,6 +48,9 @@ export type RoomState = {
   playbackSequence: number;
   playbackCommand: PlaybackCommand | null;
   playbackControlMode: PlaybackControlMode;
+  playbackControllerClientId: string | null;
+  playbackControllerUserId: string | null;
+  playbackControllerName: string | null;
   updatedAt: number;
   createdAt: number;
   emptySinceAt?: number | null;
@@ -212,6 +215,9 @@ export class RoomStore {
       playbackSequence: 0,
       playbackCommand: null,
       playbackControlMode: "shared",
+      playbackControllerClientId: null,
+      playbackControllerUserId: null,
+      playbackControllerName: null,
       updatedAt: createdAt,
       createdAt,
       emptySinceAt: null,
@@ -396,10 +402,14 @@ export class RoomStore {
     return this.updateRoom(
       roomId,
       (room) => {
-        this.requirePlaybackAuthority(room, clientId, userId);
+        this.requireMember(room, clientId);
+        const participant = this.getParticipant(room, clientId, userId);
         room.videoId = videoId;
         room.playbackState = "playing";
         room.currentTimeSeconds = 0;
+        room.playbackControllerClientId = participant.clientId;
+        room.playbackControllerUserId = participant.userId;
+        room.playbackControllerName = participant.name;
       },
       { touchPlaybackUpdatedAt: true, playbackCommand: "video:set" }
     );
@@ -550,6 +560,18 @@ export class RoomStore {
     }
   }
 
+  private getParticipant(room: RoomState, clientId: string, userId: string): Participant {
+    const participant = room.participants.find(
+      (entry) => entry.clientId === clientId || entry.userId === userId
+    );
+
+    if (!participant) {
+      throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
+    }
+
+    return participant;
+  }
+
   private requirePlaybackAuthority(room: RoomState, clientId: string, userId: string): void {
     this.requireMember(room, clientId);
 
@@ -557,6 +579,17 @@ export class RoomStore {
       throw new RoomError(
         "INVALID_ROOM_MEMBER",
         "Playback is currently controlled by the space host."
+      );
+    }
+
+    if (
+      room.playbackControllerUserId &&
+      room.playbackControllerUserId !== userId &&
+      room.playbackControllerClientId !== clientId
+    ) {
+      throw new RoomError(
+        "INVALID_ROOM_MEMBER",
+        `${room.playbackControllerName ?? "The current controller"} is controlling this video. Sync a new video to take control.`
       );
     }
   }
@@ -629,7 +662,10 @@ function normalizeRoomState(room: RoomState): RoomState {
       Number.isFinite(room.playbackUpdatedAt) ? room.playbackUpdatedAt : room.updatedAt ?? room.createdAt,
     playbackSequence: Number.isFinite(room.playbackSequence) ? room.playbackSequence : 0,
     playbackCommand: room.playbackCommand ?? null,
-    playbackControlMode: room.playbackControlMode ?? "shared"
+    playbackControlMode: room.playbackControlMode ?? "shared",
+    playbackControllerClientId: room.playbackControllerClientId ?? null,
+    playbackControllerUserId: room.playbackControllerUserId ?? null,
+    playbackControllerName: room.playbackControllerName ?? null
   };
 }
 
