@@ -1535,7 +1535,36 @@ html[data-theme="dark"] .status-pill {
   inset: 0;
   z-index: 2;
   background: transparent;
-  cursor: not-allowed;
+  cursor: default;
+}
+
+.player-controls {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin-top: 18px;
+}
+
+.player-timeline {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.player-range {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.player-time {
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+  min-width: 40px;
+  text-align: center;
 }
 
 .video-placeholder {
@@ -1792,6 +1821,14 @@ html[data-theme="dark"] .modal-backdrop {
   .room-stage-main .video-shell {
     aspect-ratio: 16 / 10;
     border-radius: 24px;
+  }
+
+  .player-controls {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .player-timeline {
+    grid-column: 1 / -1;
   }
 
   .hero-card,
@@ -2086,6 +2123,14 @@ html[data-theme="dark"] .modal-backdrop {
   .room-stage-main .video-shell {
     aspect-ratio: 16 / 11;
     border-radius: 18px;
+  }
+
+  .player-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .player-timeline {
+    grid-template-columns: auto minmax(0, 1fr) auto;
   }
 
   .space-chat-shell {

@@ -23,6 +23,7 @@ type YouTubePlayer = {
   pauseVideo(): void;
   seekTo(seconds: number, allowSeekAhead: boolean): void;
   getCurrentTime(): number;
+  getDuration(): number;
 };
 
 type YouTubeStateChangeEvent = {
@@ -56,14 +57,11 @@ declare global {
 }
 
 const PLAYBACK_APPLY_TOLERANCE = 0.25;
-const SEEK_EMIT_THROTTLE_MS = 180;
 const PLAYER_SUPPRESS_MS = 1200;
-const SEEK_DETECTION_THRESHOLD = 0.3;
-const PAUSED_SEEK_DETECTION_THRESHOLD = 0.12;
-const SYNC_INTERVAL_MS = 120;
+const PLAYER_TIMELINE_POLL_MS = 250;
+const VIEWER_SYNC_INTERVAL_MS = 300;
 const CHAT_TYPING_IDLE_MS = 1200;
 const PRESENCE_HEARTBEAT_MS = 10_000;
-const LOCAL_CONTROL_LOCK_MS = 900;
 const HARD_RESYNC_DRIFT_SECONDS = 1.15;
 const SOFT_RESYNC_DRIFT_SECONDS = 0.55;
 const DIRECT_PLAYBACK_DEDUPE_MS = 2000;
@@ -108,12 +106,15 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   const [roomState, setRoomState] = useState<RoomStatePayload | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatDraft, setChatDraft] = useState("");
+  const [playerDuration, setPlayerDuration] = useState(0);
+  const [playerPosition, setPlayerPosition] = useState(0);
+  const [scrubValue, setScrubValue] = useState(0);
+  const [isScrubbing, setIsScrubbing] = useState(false);
 
   const pusherRef = useRef<Pusher | null>(null);
   const realtimeChannelRef = useRef<RealtimePlaybackChannel | null>(null);
   const playerRef = useRef<YouTubePlayer | null>(null);
   const suppressPlayerEventsRef = useRef(false);
-  const lastSeekEmitAtRef = useRef(0);
   const knownVideoIdRef = useRef<string | null>(null);
   const joinedRef = useRef(false);
   const roomStateRef = useRef<RoomStatePayload | null>(null);
@@ -125,11 +126,6 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     currentTimeSeconds: number;
     playbackUpdatedAt: number;
     playbackSequence: number;
-  } | null>(null);
-  const playbackSnapshotRef = useRef<{
-    currentTimeSeconds: number;
-    expectedTimeSeconds: number;
-    observedAt: number;
   } | null>(null);
   const chatListRef = useRef<HTMLDivElement | null>(null);
   const typingStopTimeoutRef = useRef<number | null>(null);
@@ -156,6 +152,8 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     !roomState.playbackControllerUserId ||
     roomState.playbackControllerUserId === viewer.id ||
     roomState.playbackControllerClientId === clientId;
+
+  const displayedPosition = isScrubbing ? scrubValue : playerPosition;
 
   const emitAction = useCallback(async (action: string, payload: Record<string, unknown> = {}) => {
     try {
@@ -220,6 +218,67 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       console.error(error);
     }
   }
+
+  const applyDirectPlaybackCommand = useCallback((payload: DirectPlaybackCommandPayload) => {
+    const player = playerRef.current;
+    if (
+      !player ||
+      !playerReadyRef.current ||
+      typeof player.seekTo !== "function" ||
+      typeof player.playVideo !== "function" ||
+      typeof player.pauseVideo !== "function" ||
+      typeof player.loadVideoById !== "function"
+    ) {
+      return;
+    }
+
+    runWithSuppressedPlayerEvents(() => {
+      if (payload.action === "video:set" && payload.videoId) {
+        knownVideoIdRef.current = payload.videoId;
+        player.loadVideoById(payload.videoId, payload.currentTimeSeconds);
+      } else {
+        player.seekTo(payload.currentTimeSeconds, true);
+      }
+
+      if (payload.playbackState === "playing") {
+        player.playVideo();
+      } else {
+        player.pauseVideo();
+      }
+    });
+
+    setPlayerPosition(payload.currentTimeSeconds);
+    setScrubValue(payload.currentTimeSeconds);
+  }, []);
+
+  const dispatchPlaybackCommand = useCallback(async (
+    action: DirectPlaybackCommandPayload["action"],
+    options: { currentTimeSeconds: number; videoId?: string | null; playbackState: RoomStatePayload["playbackState"] }
+  ) => {
+    if (!joinedRef.current || !canControlPlayback) {
+      return;
+    }
+
+    const payload: DirectPlaybackCommandPayload = {
+      action,
+      actorClientId: clientId,
+      currentTimeSeconds: clampPlaybackTime(options.currentTimeSeconds),
+      videoId: options.videoId,
+      playbackState: options.playbackState,
+      issuedAt: Date.now()
+    };
+
+    markPendingLocalSync(action);
+    applyDirectPlaybackCommand(payload);
+    triggerDirectPlaybackCommand(payload);
+
+    if (action === "video:set" && options.videoId) {
+      await emitAction("video:set", { videoId: options.videoId });
+      return;
+    }
+
+    await emitAction(action, { currentTimeSeconds: payload.currentTimeSeconds });
+  }, [applyDirectPlaybackCommand, canControlPlayback, clientId, emitAction]);
 
   const emitLeaveRequest = useCallback((currentClientId: string) => {
     void fetch(`/api/rooms/${roomId}/action`, {
@@ -340,32 +399,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         }
         lastDirectPlaybackEventRef.current = eventKey;
 
-        const player = playerRef.current;
-        if (
-          !player ||
-          !playerReadyRef.current ||
-          typeof player.seekTo !== "function" ||
-          typeof player.playVideo !== "function" ||
-          typeof player.pauseVideo !== "function" ||
-          typeof player.loadVideoById !== "function"
-        ) {
-          return;
-        }
-
-        runWithSuppressedPlayerEvents(() => {
-          if (payload.action === "video:set" && payload.videoId) {
-            knownVideoIdRef.current = payload.videoId;
-            player.loadVideoById(payload.videoId, payload.currentTimeSeconds);
-          } else {
-            player.seekTo(payload.currentTimeSeconds, true);
-          }
-
-          if (payload.playbackState === "playing") {
-            player.playVideo();
-          } else {
-            player.pauseVideo();
-          }
-        });
+        applyDirectPlaybackCommand(payload);
 
         recentRemotePlaybackRef.current = {
           action: payload.action,
@@ -467,7 +501,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       pusher?.disconnect();
       realtimeChannelRef.current = null;
     };
-  }, [applyRoomStateToPlayer, clientId, displayName, roomId, viewer.image, emitAction, emitLeaveRequest]);
+  }, [applyDirectPlaybackCommand, applyRoomStateToPlayer, clientId, displayName, roomId, viewer.image, emitAction, emitLeaveRequest]);
 
   useEffect(() => {
     let cancelled = false;
@@ -480,47 +514,16 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       playerRef.current = new window.YT.Player("youtube-player", {
         playerVars: {
           playsinline: 1,
-          rel: 0
+          rel: 0,
+          controls: 0,
+          disablekb: 1,
+          modestbranding: 1
         },
         events: {
           onReady: () => {
             playerReadyRef.current = true;
             if (roomStateRef.current) {
               applyRoomStateToPlayer(roomStateRef.current);
-            }
-          },
-          onStateChange: (event) => {
-            if (
-              !joinedRef.current ||
-              !canControlPlayback ||
-              suppressPlayerEventsRef.current ||
-              !playerReadyRef.current ||
-              typeof event.target.getCurrentTime !== "function"
-            ) {
-              return;
-            }
-
-            const currentTimeSeconds = event.target.getCurrentTime();
-            if (event.data === window.YT?.PlayerState.PLAYING) {
-              markPendingLocalSync("playback:play");
-              triggerDirectPlaybackCommand({
-                action: "playback:play",
-                actorClientId: clientId,
-                currentTimeSeconds,
-                playbackState: "playing",
-                issuedAt: Date.now()
-              });
-              emitAction("playback:play", { currentTimeSeconds });
-            } else if (event.data === window.YT?.PlayerState.PAUSED) {
-              markPendingLocalSync("playback:pause");
-              triggerDirectPlaybackCommand({
-                action: "playback:pause",
-                actorClientId: clientId,
-                currentTimeSeconds,
-                playbackState: "paused",
-                issuedAt: Date.now()
-              });
-              emitAction("playback:pause", { currentTimeSeconds });
             }
           }
         }
@@ -533,17 +536,46 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       playerRef.current?.destroy();
       playerRef.current = null;
     };
-  }, [applyRoomStateToPlayer, canControlPlayback, clientId, emitAction]);
+  }, [applyRoomStateToPlayer]);
 
   useEffect(() => {
-    if (!playerRef.current || !joinedRef.current || !playerReadyRef.current) {
+    if (!playerRef.current || !playerReadyRef.current) {
       return;
     }
 
     const intervalId = window.setInterval(() => {
       if (
-        !roomState ||
-        !canControlPlayback ||
+        !playerRef.current ||
+        typeof playerRef.current.getCurrentTime !== "function"
+      ) {
+        return;
+      }
+
+      const currentTimeSeconds = clampPlaybackTime(playerRef.current.getCurrentTime());
+      const durationSeconds =
+        typeof playerRef.current.getDuration === "function"
+          ? clampPlaybackTime(playerRef.current.getDuration())
+          : 0;
+
+      setPlayerDuration(durationSeconds);
+      setPlayerPosition(currentTimeSeconds);
+      if (!isScrubbing) {
+        setScrubValue(currentTimeSeconds);
+      }
+    }, PLAYER_TIMELINE_POLL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isScrubbing]);
+
+  useEffect(() => {
+    if (!playerRef.current || !joinedRef.current || !playerReadyRef.current || !roomState || canControlPlayback) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (
         !playerRef.current ||
         suppressPlayerEventsRef.current ||
         typeof playerRef.current.getCurrentTime !== "function"
@@ -553,26 +585,16 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
       const currentTimeSeconds = playerRef.current.getCurrentTime();
       const expectedTimeSeconds = getExpectedRoomTime(roomState);
-      const now = Date.now();
       const driftSeconds = Math.abs(currentTimeSeconds - expectedTimeSeconds);
-      const previousSnapshot = playbackSnapshotRef.current;
-      const hasPendingLocalPlayback =
-        pendingLocalSyncRef.current !== null &&
-        (pendingLocalSyncRef.current.syncEvent === "video:set" ||
-          pendingLocalSyncRef.current.syncEvent === "playback:play" ||
-          pendingLocalSyncRef.current.syncEvent === "playback:pause" ||
-          pendingLocalSyncRef.current.syncEvent === "playback:seek") &&
-        now - pendingLocalSyncRef.current.issuedAt < LOCAL_CONTROL_LOCK_MS &&
-        roomState.playbackUpdatedAt < pendingLocalSyncRef.current.issuedAt;
 
       if (roomState.playbackState === "playing") {
-        if (driftSeconds > HARD_RESYNC_DRIFT_SECONDS && !hasPendingLocalPlayback) {
+        if (driftSeconds > HARD_RESYNC_DRIFT_SECONDS) {
           driftWarningCountRef.current = 0;
           runWithSuppressedPlayerEvents(() => {
             playerRef.current?.seekTo(expectedTimeSeconds, true);
             playerRef.current?.playVideo();
           });
-        } else if (driftSeconds > SOFT_RESYNC_DRIFT_SECONDS && !hasPendingLocalPlayback) {
+        } else if (driftSeconds > SOFT_RESYNC_DRIFT_SECONDS) {
           driftWarningCountRef.current += 1;
           if (driftWarningCountRef.current >= 2) {
             driftWarningCountRef.current = 0;
@@ -584,64 +606,19 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         } else {
           driftWarningCountRef.current = 0;
         }
-
-        if (previousSnapshot && now - lastSeekEmitAtRef.current >= SEEK_EMIT_THROTTLE_MS) {
-          const actualDelta = currentTimeSeconds - previousSnapshot.currentTimeSeconds;
-          const expectedDelta = expectedTimeSeconds - previousSnapshot.expectedTimeSeconds;
-
-          if (Math.abs(actualDelta - expectedDelta) > SEEK_DETECTION_THRESHOLD) {
-            lastSeekEmitAtRef.current = now;
-            markPendingLocalSync("playback:seek");
-            triggerDirectPlaybackCommand({
-              action: "playback:seek",
-              actorClientId: clientId,
-              currentTimeSeconds,
-              playbackState: roomState.playbackState,
-              issuedAt: now
-            });
-            emitAction("playback:seek", { currentTimeSeconds });
-          }
-        }
       } else {
         driftWarningCountRef.current = 0;
-        if (driftSeconds > PLAYBACK_APPLY_TOLERANCE && !hasPendingLocalPlayback) {
+        if (driftSeconds > PLAYBACK_APPLY_TOLERANCE) {
           runWithSuppressedPlayerEvents(() => {
             playerRef.current?.seekTo(expectedTimeSeconds, true);
             playerRef.current?.pauseVideo();
           });
         }
-
-        if (
-          previousSnapshot &&
-          now - lastSeekEmitAtRef.current >= SEEK_EMIT_THROTTLE_MS &&
-          Math.abs(currentTimeSeconds - previousSnapshot.currentTimeSeconds) >
-            PAUSED_SEEK_DETECTION_THRESHOLD
-        ) {
-          lastSeekEmitAtRef.current = now;
-          markPendingLocalSync("playback:seek");
-          triggerDirectPlaybackCommand({
-            action: "playback:seek",
-            actorClientId: clientId,
-            currentTimeSeconds,
-            playbackState: "paused",
-            issuedAt: now
-          });
-          emitAction("playback:seek", { currentTimeSeconds });
-        }
       }
+    }, VIEWER_SYNC_INTERVAL_MS);
 
-      playbackSnapshotRef.current = {
-        currentTimeSeconds,
-        expectedTimeSeconds,
-        observedAt: now
-      };
-    }, SYNC_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(intervalId);
-      playbackSnapshotRef.current = null;
-    };
-  }, [canControlPlayback, clientId, roomId, roomState, emitAction]);
+    return () => window.clearInterval(intervalId);
+  }, [canControlPlayback, roomState]);
 
   useEffect(() => {
     if (!roomState || !playerRef.current || !playerReadyRef.current) {
@@ -738,17 +715,44 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
     setInlineError(null);
     setInlineNotice("Sending video to the room...");
-    markPendingLocalSync("video:set");
-    triggerDirectPlaybackCommand({
-      action: "video:set",
-      actorClientId: clientId,
+    void dispatchPlaybackCommand("video:set", {
       videoId,
       currentTimeSeconds: 0,
-      playbackState: "playing",
-      issuedAt: Date.now()
+      playbackState: "playing"
     });
-    emitAction("video:set", { videoId });
     setInputUrl("");
+  }
+
+  function handlePlayPause() {
+    if (!roomState) {
+      return;
+    }
+
+    void dispatchPlaybackCommand(
+      roomState.playbackState === "playing" ? "playback:pause" : "playback:play",
+      {
+        currentTimeSeconds: playerPosition,
+        playbackState: roomState.playbackState === "playing" ? "paused" : "playing"
+      }
+    );
+  }
+
+  function handleSeek(deltaSeconds: number) {
+    const nextTime = clampPlaybackTime(playerPosition + deltaSeconds);
+    void dispatchPlaybackCommand("playback:seek", {
+      currentTimeSeconds: nextTime,
+      playbackState: roomState?.playbackState ?? "paused"
+    });
+  }
+
+  function commitScrub(nextTime: number) {
+    setIsScrubbing(false);
+    const clampedTime = clampPlaybackTime(nextTime);
+    setScrubValue(clampedTime);
+    void dispatchPlaybackCommand("playback:seek", {
+      currentTimeSeconds: clampedTime,
+      playbackState: roomState?.playbackState ?? "paused"
+    });
   }
 
   async function copyShareUrl() {
@@ -912,13 +916,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           <div className="video-shell">
             <div className="player-stage">
               <div id="youtube-player" />
-              {roomState?.videoId && !canControlPlayback ? (
-                <div
-                  className="video-control-guard"
-                  aria-label="Viewer mode active"
-                  title={`${roomState.playbackControllerName ?? "The current controller"} controls this video`}
-                />
-              ) : null}
+              {roomState?.videoId ? <div className="video-control-guard" aria-hidden="true" /> : null}
             </div>
             {!roomState?.videoId ? (
               <div className="video-placeholder">
@@ -929,6 +927,54 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
               </div>
             ) : null}
           </div>
+          {roomState?.videoId ? (
+            <div className="player-controls">
+              <button
+                className="button-secondary"
+                type="button"
+                onClick={() => handleSeek(-10)}
+                disabled={!canControlPlayback}
+              >
+                -10s
+              </button>
+              <button
+                className="button"
+                type="button"
+                onClick={handlePlayPause}
+                disabled={!canControlPlayback}
+              >
+                {roomState.playbackState === "playing" ? "Pause" : "Play"}
+              </button>
+              <button
+                className="button-secondary"
+                type="button"
+                onClick={() => handleSeek(10)}
+                disabled={!canControlPlayback}
+              >
+                +10s
+              </button>
+              <div className="player-timeline">
+                <span className="player-time">{formatPlaybackTime(displayedPosition)}</span>
+                <input
+                  className="player-range"
+                  type="range"
+                  min={0}
+                  max={Math.max(playerDuration, displayedPosition, 1)}
+                  step={0.1}
+                  value={displayedPosition}
+                  onChange={(event) => {
+                    const nextValue = Number(event.target.value);
+                    setIsScrubbing(true);
+                    setScrubValue(nextValue);
+                  }}
+                  onMouseUp={(event) => commitScrub(Number((event.target as HTMLInputElement).value))}
+                  onTouchEnd={(event) => commitScrub(Number((event.target as HTMLInputElement).value))}
+                  disabled={!roomState.videoId || !canControlPlayback}
+                />
+                <span className="player-time">{formatPlaybackTime(playerDuration)}</span>
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <section className="room-footer panel">
@@ -1351,4 +1397,19 @@ function getExpectedRoomTime(roomState: RoomStatePayload): number {
   }
   const elapsedSeconds = (Date.now() - roomState.playbackUpdatedAt) / 1000;
   return Math.max(0, roomState.currentTimeSeconds + elapsedSeconds);
+}
+
+function clampPlaybackTime(value: number) {
+  if (!Number.isFinite(value) || value < 0) {
+    return 0;
+  }
+
+  return Number(value.toFixed(2));
+}
+
+function formatPlaybackTime(seconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
