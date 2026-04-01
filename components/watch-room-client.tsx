@@ -79,6 +79,20 @@ type RoomChannelPayload = {
   syncEvent?: RoomStatePayload["syncEvent"];
 };
 
+type RealtimePlaybackChannel = {
+  bind(eventName: string, callback: (payload: DirectPlaybackCommandPayload) => void): void;
+  trigger(eventName: string, payload: DirectPlaybackCommandPayload): boolean;
+};
+
+type DirectPlaybackCommandPayload = {
+  action: "video:set" | "playback:play" | "playback:pause" | "playback:seek";
+  actorClientId: string;
+  videoId?: string | null;
+  currentTimeSeconds: number;
+  playbackState: RoomStatePayload["playbackState"];
+  issuedAt: number;
+};
+
 export default function WatchRoomClient({ roomId, viewer }: Props) {
   const [shareUrl, setShareUrl] = useState("");
   const [clientId, setClientId] = useState("");
@@ -95,6 +109,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   const [chatDraft, setChatDraft] = useState("");
 
   const pusherRef = useRef<Pusher | null>(null);
+  const realtimeChannelRef = useRef<RealtimePlaybackChannel | null>(null);
   const playerRef = useRef<YouTubePlayer | null>(null);
   const suppressPlayerEventsRef = useRef(false);
   const lastSeekEmitAtRef = useRef(0);
@@ -127,6 +142,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       | "chat:read";
     issuedAt: number;
   } | null>(null);
+  const lastDirectPlaybackEventRef = useRef<string | null>(null);
 
   const emitAction = useCallback(async (action: string, payload: Record<string, unknown> = {}) => {
     try {
@@ -177,6 +193,19 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       syncEvent,
       issuedAt: Date.now()
     };
+  }
+
+  function triggerDirectPlaybackCommand(payload: DirectPlaybackCommandPayload) {
+    const channel = realtimeChannelRef.current;
+    if (!channel || typeof channel.trigger !== "function") {
+      return;
+    }
+
+    try {
+      channel.trigger("client-playback-command", payload);
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   const emitLeaveRequest = useCallback((currentClientId: string) => {
@@ -269,10 +298,62 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
       pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY || "", {
         cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER || "us2",
+        channelAuthorization: {
+          transport: "ajax",
+          endpoint: "/api/pusher/auth"
+        }
       });
 
       pusherRef.current = pusher;
       const channel = pusher.subscribe(`room-${roomId}`);
+      const realtimeChannel = pusher.subscribe(`private-room-${roomId}`);
+      realtimeChannelRef.current = realtimeChannel;
+
+      realtimeChannel.bind("client-playback-command", (payload: DirectPlaybackCommandPayload) => {
+        if (!isMounted || payload.actorClientId === clientId) {
+          return;
+        }
+
+        const eventKey = [
+          payload.actorClientId,
+          payload.action,
+          payload.issuedAt,
+          payload.videoId ?? "",
+          payload.currentTimeSeconds.toFixed(2)
+        ].join(":");
+
+        if (lastDirectPlaybackEventRef.current === eventKey) {
+          return;
+        }
+        lastDirectPlaybackEventRef.current = eventKey;
+
+        const player = playerRef.current;
+        if (
+          !player ||
+          !playerReadyRef.current ||
+          typeof player.seekTo !== "function" ||
+          typeof player.playVideo !== "function" ||
+          typeof player.pauseVideo !== "function" ||
+          typeof player.loadVideoById !== "function"
+        ) {
+          return;
+        }
+
+        runWithSuppressedPlayerEvents(() => {
+          if (payload.action === "video:set" && payload.videoId) {
+            knownVideoIdRef.current = payload.videoId;
+            player.loadVideoById(payload.videoId, payload.currentTimeSeconds);
+          } else {
+            player.seekTo(payload.currentTimeSeconds, true);
+          }
+
+          if (payload.playbackState === "playing") {
+            player.playVideo();
+          } else {
+            player.pauseVideo();
+          }
+        });
+      });
 
       channel.bind("room:state", (data: RoomChannelPayload) => {
         if (!isMounted) return;
@@ -354,6 +435,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       window.removeEventListener("beforeunload", handleBeforeUnload);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       pusher?.disconnect();
+      realtimeChannelRef.current = null;
     };
   }, [applyRoomStateToPlayer, clientId, displayName, roomId, viewer.image, emitAction, emitLeaveRequest]);
 
@@ -390,9 +472,23 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
             const currentTimeSeconds = event.target.getCurrentTime();
             if (event.data === window.YT?.PlayerState.PLAYING) {
               markPendingLocalSync("playback:play");
+              triggerDirectPlaybackCommand({
+                action: "playback:play",
+                actorClientId: clientId,
+                currentTimeSeconds,
+                playbackState: "playing",
+                issuedAt: Date.now()
+              });
               emitAction("playback:play", { currentTimeSeconds });
             } else if (event.data === window.YT?.PlayerState.PAUSED) {
               markPendingLocalSync("playback:pause");
+              triggerDirectPlaybackCommand({
+                action: "playback:pause",
+                actorClientId: clientId,
+                currentTimeSeconds,
+                playbackState: "paused",
+                issuedAt: Date.now()
+              });
               emitAction("playback:pause", { currentTimeSeconds });
             }
           }
@@ -406,7 +502,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       playerRef.current?.destroy();
       playerRef.current = null;
     };
-  }, [applyRoomStateToPlayer, emitAction]);
+  }, [applyRoomStateToPlayer, clientId, emitAction]);
 
   useEffect(() => {
     if (!playerRef.current || !joinedRef.current || !playerReadyRef.current) {
@@ -464,6 +560,13 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           if (Math.abs(actualDelta - expectedDelta) > SEEK_DETECTION_THRESHOLD) {
             lastSeekEmitAtRef.current = now;
             markPendingLocalSync("playback:seek");
+            triggerDirectPlaybackCommand({
+              action: "playback:seek",
+              actorClientId: clientId,
+              currentTimeSeconds,
+              playbackState: roomState.playbackState,
+              issuedAt: now
+            });
             emitAction("playback:seek", { currentTimeSeconds });
           }
         }
@@ -484,6 +587,13 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         ) {
           lastSeekEmitAtRef.current = now;
           markPendingLocalSync("playback:seek");
+          triggerDirectPlaybackCommand({
+            action: "playback:seek",
+            actorClientId: clientId,
+            currentTimeSeconds,
+            playbackState: "paused",
+            issuedAt: now
+          });
           emitAction("playback:seek", { currentTimeSeconds });
         }
       }
@@ -590,6 +700,14 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     setInlineError(null);
     setInlineNotice("Sending video to the room...");
     markPendingLocalSync("video:set");
+    triggerDirectPlaybackCommand({
+      action: "video:set",
+      actorClientId: clientId,
+      videoId,
+      currentTimeSeconds: 0,
+      playbackState: "playing",
+      issuedAt: Date.now()
+    });
     emitAction("video:set", { videoId });
     setInputUrl("");
   }
