@@ -56,11 +56,13 @@ declare global {
 }
 
 const TIME_DRIFT_TOLERANCE = 0.9;
+const PLAYBACK_APPLY_TOLERANCE = 0.45;
 const SEEK_EMIT_THROTTLE_MS = 900;
 const PLAYER_SUPPRESS_MS = 900;
 const SEEK_DETECTION_THRESHOLD = 1.6;
 const SYNC_INTERVAL_MS = 700;
 const CHAT_TYPING_IDLE_MS = 1200;
+const PRESENCE_HEARTBEAT_MS = 10_000;
 
 type Props = {
   roomId: string;
@@ -97,6 +99,12 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   const joinedRef = useRef(false);
   const roomStateRef = useRef<RoomStatePayload | null>(null);
   const playerReadyRef = useRef(false);
+  const lastAppliedPlaybackRef = useRef<{
+    videoId: string | null;
+    playbackState: RoomStatePayload["playbackState"];
+    currentTimeSeconds: number;
+    updatedAt: number;
+  } | null>(null);
   const playbackSnapshotRef = useRef<{
     currentTimeSeconds: number;
     expectedTimeSeconds: number;
@@ -124,6 +132,15 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       suppressPlayerEventsRef.current = false;
     }, PLAYER_SUPPRESS_MS);
   }
+
+  const emitLeaveRequest = useCallback((currentClientId: string) => {
+    void fetch(`/api/rooms/${roomId}/action`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "room:leave", clientId: currentClientId }),
+      keepalive: true
+    }).catch(() => undefined);
+  }, [roomId]);
 
   const applyRoomStateToPlayer = useCallback((nextState: RoomStatePayload) => {
     const player = playerRef.current;
@@ -157,7 +174,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
     const expectedTimeSeconds = getExpectedRoomTime(nextState);
     const localTime = player.getCurrentTime();
-    if (Math.abs(localTime - expectedTimeSeconds) > TIME_DRIFT_TOLERANCE) {
+    if (Math.abs(localTime - expectedTimeSeconds) > PLAYBACK_APPLY_TOLERANCE) {
       runWithSuppressedPlayerEvents(() => {
         player.seekTo(expectedTimeSeconds, true);
       });
@@ -170,6 +187,13 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         player.pauseVideo();
       }
     });
+
+    lastAppliedPlaybackRef.current = {
+      videoId: nextState.videoId,
+      playbackState: nextState.playbackState,
+      currentTimeSeconds: nextState.currentTimeSeconds,
+      updatedAt: nextState.updatedAt
+    };
   }, []);
 
   useEffect(() => {
@@ -199,12 +223,15 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         if (!isMounted) return;
         joinedRef.current = true;
         const nextState = data.state;
+        const previousState = roomStateRef.current;
         roomStateRef.current = nextState;
         setRoomState(nextState);
         setJoinError(null);
         setInlineNotice(getRoomNotice(data, clientId));
         setConnectionLabel(getPresenceMessage(nextState.participants?.length || 0));
-        applyRoomStateToPlayer(nextState);
+        if (shouldApplyIncomingPlayback(previousState, nextState, data.syncEvent)) {
+          applyRoomStateToPlayer(nextState);
+        }
       });
 
       channel.bind("room:error", (payload: RoomErrorPayload) => {
@@ -237,21 +264,35 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
     boot();
 
+    const heartbeatId = window.setInterval(() => {
+      if (joinedRef.current) {
+        emitAction("room:heartbeat");
+      }
+    }, PRESENCE_HEARTBEAT_MS);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && joinedRef.current) {
+        emitAction("room:heartbeat");
+      }
+    };
+
     const handleBeforeUnload = () => {
-      navigator.sendBeacon(
-        `/api/rooms/${roomId}/action`,
-        JSON.stringify({ action: "room:leave", clientId })
-      );
+      emitLeaveRequest(clientId);
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       isMounted = false;
-      handleBeforeUnload();
+      if (clientId) {
+        emitLeaveRequest(clientId);
+      }
+      window.clearInterval(heartbeatId);
       window.removeEventListener("beforeunload", handleBeforeUnload);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       pusher?.disconnect();
     };
-  }, [applyRoomStateToPlayer, clientId, displayName, roomId, viewer.image, emitAction]);
+  }, [applyRoomStateToPlayer, clientId, displayName, roomId, viewer.image, emitAction, emitLeaveRequest]);
 
   useEffect(() => {
     let cancelled = false;
@@ -365,8 +406,17 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       return;
     }
 
+    const previousApplied = lastAppliedPlaybackRef.current;
     roomStateRef.current = roomState;
-    applyRoomStateToPlayer(roomState);
+    if (
+      !previousApplied ||
+      previousApplied.videoId !== roomState.videoId ||
+      previousApplied.playbackState !== roomState.playbackState ||
+      Math.abs(previousApplied.currentTimeSeconds - roomState.currentTimeSeconds) > PLAYBACK_APPLY_TOLERANCE ||
+      previousApplied.updatedAt !== roomState.updatedAt
+    ) {
+      applyRoomStateToPlayer(roomState);
+    }
   }, [applyRoomStateToPlayer, roomState]);
 
   useEffect(() => {
@@ -822,6 +872,33 @@ function getTypingLabel(names: string[]) {
 function getPresenceMessage(count: number): string {
   if (count >= 2) return "Both participants connected.";
   return "Waiting for the second participant...";
+}
+
+function shouldApplyIncomingPlayback(
+  previousState: RoomStatePayload | null,
+  nextState: RoomStatePayload,
+  syncEvent?: RoomChannelPayload["syncEvent"]
+) {
+  if (!previousState) {
+    return true;
+  }
+
+  if (
+    syncEvent &&
+    syncEvent !== "video:set" &&
+    syncEvent !== "playback:play" &&
+    syncEvent !== "playback:pause" &&
+    syncEvent !== "playback:seek"
+  ) {
+    return false;
+  }
+
+  return (
+    previousState.videoId !== nextState.videoId ||
+    previousState.playbackState !== nextState.playbackState ||
+    Math.abs(previousState.currentTimeSeconds - nextState.currentTimeSeconds) > PLAYBACK_APPLY_TOLERANCE ||
+    previousState.updatedAt !== nextState.updatedAt
+  );
 }
 
 function getRoomNotice(roomStatePayload: RoomChannelPayload, clientId: string): string | null {

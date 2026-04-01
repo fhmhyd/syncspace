@@ -6,10 +6,12 @@ export type PlaybackState = "playing" | "paused";
 
 export type Participant = {
   clientId: string;
+  userId: string;
   name: string;
   image?: string | null;
   socketId: string;
   joinedAt: number;
+  lastSeenAt: number;
 };
 
 export type ChatMessage = {
@@ -62,6 +64,8 @@ export class RoomError extends Error {
 
 const ROOM_PREFIX = "syncscreen:room:";
 const ROOMS_SET_KEY = "syncscreen:active_rooms";
+const ROOM_TTL_SECONDS = 60 * 60 * 24;
+const PARTICIPANT_STALE_MS = 25_000;
 
 const useKv = Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
 const useRedisUrl = Boolean(process.env.REDIS_URL);
@@ -199,7 +203,7 @@ export class RoomStore {
       typingParticipants: []
     };
 
-    await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: 60 * 60 * 24 });
+    await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: ROOM_TTL_SECONDS });
     await kvStore.sadd(ROOMS_SET_KEY, roomId);
     return room;
   }
@@ -207,7 +211,16 @@ export class RoomStore {
   async getRoom(roomId: string): Promise<RoomState | null> {
     const kvStore = getKvStore();
     const room = await kvStore.get<RoomState>(`${ROOM_PREFIX}${roomId}`);
-    return room ?? null;
+    if (!room) {
+      return null;
+    }
+
+    const { room: cleanedRoom, changed } = cleanupRoomPresence(room);
+    if (changed) {
+      await kvStore.set(`${ROOM_PREFIX}${roomId}`, cleanedRoom, { ex: ROOM_TTL_SECONDS });
+    }
+
+    return cleanedRoom;
   }
 
   async getRooms(): Promise<RoomSummary[]> {
@@ -235,15 +248,21 @@ export class RoomStore {
       }));
   }
 
-  private async updateRoom(roomId: string, updater: (room: RoomState) => void): Promise<RoomState> {
+  private async updateRoom(
+    roomId: string,
+    updater: (room: RoomState) => void,
+    options: { touchUpdatedAt?: boolean } = {}
+  ): Promise<RoomState> {
     const kvStore = getKvStore();
     const room = await this.getRoom(roomId);
     if (!room) {
       throw new RoomError("ROOM_NOT_FOUND", "This room does not exist or has expired.");
     }
     updater(room);
-    room.updatedAt = Date.now();
-    await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: 60 * 60 * 24 });
+    if (options.touchUpdatedAt ?? true) {
+      room.updatedAt = Date.now();
+    }
+    await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: ROOM_TTL_SECONDS });
     return room;
   }
 
@@ -254,19 +273,24 @@ export class RoomStore {
         throw new RoomError("INVALID_ROOM_MEMBER", "A display name is required to join the room.");
       }
 
-      const existing = room.participants.find((entry) => entry.clientId === participant.clientId);
+      const existing = room.participants.find(
+        (entry) => entry.clientId === participant.clientId || entry.userId === participant.userId
+      );
       if (!existing && room.participants.length >= 2) {
         throw new RoomError("ROOM_FULL", "This room already has two participants.");
       }
 
       if (existing) {
         room.participants = room.participants.map((entry) =>
-          entry.clientId === participant.clientId
+          entry.clientId === existing.clientId
             ? {
                 ...entry,
+                clientId: participant.clientId,
+                userId: participant.userId,
                 socketId: participant.socketId,
                 name: normalizedName,
-                image: participant.image ?? null
+                image: participant.image ?? null,
+                lastSeenAt: participant.lastSeenAt
               }
             : entry
         );
@@ -285,6 +309,34 @@ export class RoomStore {
     });
   }
 
+  async touchParticipant(roomId: string, clientId: string, userId: string): Promise<RoomState> {
+    return this.updateRoom(
+      roomId,
+      (room) => {
+        const participant = room.participants.find(
+          (entry) => entry.clientId === clientId || entry.userId === userId
+        );
+
+        if (!participant) {
+          throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
+        }
+
+        room.participants = room.participants.map((entry) =>
+          entry.clientId === participant.clientId
+            ? {
+                ...entry,
+                clientId,
+                userId,
+                socketId: clientId,
+                lastSeenAt: Date.now()
+              }
+            : entry
+        );
+      },
+      { touchUpdatedAt: false }
+    );
+  }
+
   async leaveRoom(roomId: string, clientId: string): Promise<RoomState | null> {
     const kvStore = getKvStore();
     const room = await this.getRoom(roomId);
@@ -299,13 +351,7 @@ export class RoomStore {
     }
     room.updatedAt = Date.now();
 
-    if (room.participants.length === 0) {
-      await kvStore.del(`${ROOM_PREFIX}${roomId}`);
-      await kvStore.srem(ROOMS_SET_KEY, roomId);
-      return null;
-    }
-
-    await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: 60 * 60 * 24 });
+    await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: ROOM_TTL_SECONDS });
     return room;
   }
 
@@ -420,6 +466,54 @@ export class RoomStore {
       throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
     }
   }
+}
+
+function cleanupRoomPresence(room: RoomState): { room: RoomState; changed: boolean } {
+  const activeParticipants = room.participants.filter((participant) => {
+    if (!Number.isFinite(participant.lastSeenAt)) {
+      return false;
+    }
+    return Date.now() - participant.lastSeenAt <= PARTICIPANT_STALE_MS;
+  });
+  const removedClientIds = new Set(
+    room.participants
+      .filter((participant) => {
+        if (!Number.isFinite(participant.lastSeenAt)) {
+          return true;
+        }
+        return Date.now() - participant.lastSeenAt > PARTICIPANT_STALE_MS;
+      })
+      .map((participant) => participant.clientId)
+  );
+
+  const nextOwnerClientId = activeParticipants.some(
+    (participant) => participant.clientId === room.ownerClientId
+  )
+    ? room.ownerClientId
+    : activeParticipants[0]?.clientId ?? null;
+
+  const nextTypingParticipants = room.typingParticipants.filter(
+    (participant) => !removedClientIds.has(participant.clientId)
+  );
+
+  const changed =
+    activeParticipants.length !== room.participants.length ||
+    nextOwnerClientId !== room.ownerClientId ||
+    nextTypingParticipants.length !== room.typingParticipants.length;
+
+  if (!changed) {
+    return { room, changed: false };
+  }
+
+  return {
+    changed: true,
+    room: {
+      ...room,
+      ownerClientId: nextOwnerClientId,
+      participants: activeParticipants,
+      typingParticipants: nextTypingParticipants
+    }
+  };
 }
 
 function clampTime(value: number): number {

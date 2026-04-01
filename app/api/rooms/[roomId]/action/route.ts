@@ -71,11 +71,13 @@ export async function POST(
         
         nextState = await store.joinRoom(roomId, {
           clientId: joinPayload.clientId,
+          userId: session.user.id,
           name:
             joinPayload.displayName || session.user.googleName || session.user.name || "Guest",
           image: joinPayload.image,
           socketId: clientId, // reusing client id
-          joinedAt: Date.now()
+          joinedAt: Date.now(),
+          lastSeenAt: Date.now()
         });
         
         await broadcastRoomState(roomId, nextState, {
@@ -98,6 +100,21 @@ export async function POST(
             participantEvent: participant ? { action: "left", name: participant.name } : undefined,
             syncEvent: "participant:update"
           });
+        }
+        break;
+      }
+      case "room:heartbeat": {
+        if (!session?.user) {
+          return NextResponse.json(
+            { code: "UNAUTHORIZED", message: "You need to sign in with Google before joining a room." },
+            { status: 401 }
+          );
+        }
+
+        const previousRoom = await store.getRoom(roomId);
+        nextState = await store.touchParticipant(roomId, clientId, session.user.id);
+        if ((previousRoom?.participants.length ?? 0) !== nextState.participants.length) {
+          await broadcastRoomState(roomId, nextState, { syncedBy: clientId, syncEvent: "participant:update" });
         }
         break;
       }

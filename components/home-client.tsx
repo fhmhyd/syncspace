@@ -25,10 +25,12 @@ type Props = {
     createdAt: number;
     participants: Array<{
       clientId: string;
+      userId: string;
       name: string;
       image?: string | null;
       socketId: string;
       joinedAt: number;
+      lastSeenAt: number;
     }>;
   }[];
 };
@@ -72,10 +74,12 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
         createdAt?: number;
         participants?: {
           clientId: string;
+          userId: string;
           name: string;
           image?: string | null;
           socketId: string;
           joinedAt: number;
+          lastSeenAt: number;
         }[];
         error?: string;
       };
@@ -233,7 +237,7 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
           <section className="room-card-grid">
             {rooms.map((room) => {
               const ownerParticipant = room.participants.find(
-                (participant) => participant.name === room.ownerName
+                (participant) => participant.userId === room.ownerUserId
               );
 
               return (
