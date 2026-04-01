@@ -55,15 +55,16 @@ declare global {
   }
 }
 
-const TIME_DRIFT_TOLERANCE = 0.65;
-const PLAYBACK_APPLY_TOLERANCE = 0.35;
-const SEEK_EMIT_THROTTLE_MS = 500;
+const TIME_DRIFT_TOLERANCE = 0.45;
+const PLAYBACK_APPLY_TOLERANCE = 0.25;
+const SEEK_EMIT_THROTTLE_MS = 250;
 const PLAYER_SUPPRESS_MS = 900;
-const SEEK_DETECTION_THRESHOLD = 0.9;
-const PAUSED_SEEK_DETECTION_THRESHOLD = 0.45;
-const SYNC_INTERVAL_MS = 350;
+const SEEK_DETECTION_THRESHOLD = 0.45;
+const PAUSED_SEEK_DETECTION_THRESHOLD = 0.2;
+const SYNC_INTERVAL_MS = 180;
 const CHAT_TYPING_IDLE_MS = 1200;
 const PRESENCE_HEARTBEAT_MS = 10_000;
+const LOCAL_CONTROL_LOCK_MS = 1_500;
 
 type Props = {
   roomId: string;
@@ -113,6 +114,16 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   } | null>(null);
   const chatListRef = useRef<HTMLDivElement | null>(null);
   const typingStopTimeoutRef = useRef<number | null>(null);
+  const pendingLocalSyncRef = useRef<{
+    syncEvent:
+      | "video:set"
+      | "playback:play"
+      | "playback:pause"
+      | "playback:seek"
+      | "chat:message"
+      | "chat:read";
+    issuedAt: number;
+  } | null>(null);
 
   const emitAction = useCallback(async (action: string, payload: Record<string, unknown> = {}) => {
     try {
@@ -132,6 +143,21 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     window.setTimeout(() => {
       suppressPlayerEventsRef.current = false;
     }, PLAYER_SUPPRESS_MS);
+  }
+
+  function markPendingLocalSync(
+    syncEvent:
+      | "video:set"
+      | "playback:play"
+      | "playback:pause"
+      | "playback:seek"
+      | "chat:message"
+      | "chat:read"
+  ) {
+    pendingLocalSyncRef.current = {
+      syncEvent,
+      issuedAt: Date.now()
+    };
   }
 
   const emitLeaveRequest = useCallback((currentClientId: string) => {
@@ -225,6 +251,13 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         joinedRef.current = true;
         const nextState = data.state;
         const previousState = roomStateRef.current;
+        if (
+          pendingLocalSyncRef.current &&
+          data.syncedBy === clientId &&
+          data.syncEvent === pendingLocalSyncRef.current.syncEvent
+        ) {
+          pendingLocalSyncRef.current = null;
+        }
         roomStateRef.current = nextState;
         setRoomState(nextState);
         setJoinError(null);
@@ -327,8 +360,10 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
             const currentTimeSeconds = event.target.getCurrentTime();
             if (event.data === window.YT?.PlayerState.PLAYING) {
+              markPendingLocalSync("playback:play");
               emitAction("playback:play", { currentTimeSeconds });
             } else if (event.data === window.YT?.PlayerState.PAUSED) {
+              markPendingLocalSync("playback:pause");
               emitAction("playback:pause", { currentTimeSeconds });
             }
           }
@@ -364,9 +399,17 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       const now = Date.now();
       const driftSeconds = Math.abs(currentTimeSeconds - expectedTimeSeconds);
       const previousSnapshot = playbackSnapshotRef.current;
+      const hasPendingLocalPlayback =
+        pendingLocalSyncRef.current !== null &&
+        (pendingLocalSyncRef.current.syncEvent === "video:set" ||
+          pendingLocalSyncRef.current.syncEvent === "playback:play" ||
+          pendingLocalSyncRef.current.syncEvent === "playback:pause" ||
+          pendingLocalSyncRef.current.syncEvent === "playback:seek") &&
+        now - pendingLocalSyncRef.current.issuedAt < LOCAL_CONTROL_LOCK_MS &&
+        roomState.updatedAt < pendingLocalSyncRef.current.issuedAt;
 
       if (roomState.playbackState === "playing") {
-        if (driftSeconds > TIME_DRIFT_TOLERANCE) {
+        if (driftSeconds > TIME_DRIFT_TOLERANCE && !hasPendingLocalPlayback) {
           runWithSuppressedPlayerEvents(() => {
             playerRef.current?.seekTo(expectedTimeSeconds, true);
             playerRef.current?.playVideo();
@@ -379,11 +422,12 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
           if (Math.abs(actualDelta - expectedDelta) > SEEK_DETECTION_THRESHOLD) {
             lastSeekEmitAtRef.current = now;
+            markPendingLocalSync("playback:seek");
             emitAction("playback:seek", { currentTimeSeconds });
           }
         }
       } else {
-        if (driftSeconds > PLAYBACK_APPLY_TOLERANCE) {
+        if (driftSeconds > PLAYBACK_APPLY_TOLERANCE && !hasPendingLocalPlayback) {
           runWithSuppressedPlayerEvents(() => {
             playerRef.current?.seekTo(expectedTimeSeconds, true);
             playerRef.current?.pauseVideo();
@@ -397,6 +441,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
             PAUSED_SEEK_DETECTION_THRESHOLD
         ) {
           lastSeekEmitAtRef.current = now;
+          markPendingLocalSync("playback:seek");
           emitAction("playback:seek", { currentTimeSeconds });
         }
       }
@@ -456,6 +501,24 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       return;
     }
 
+    setRoomState((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        chatMessages: current.chatMessages.map((message) =>
+          message.id === latestUnread.id && !message.readByClientIds.includes(clientId)
+            ? {
+                ...message,
+                readByClientIds: [...message.readByClientIds, clientId]
+              }
+            : message
+        )
+      };
+    });
+    markPendingLocalSync("chat:read");
     emitAction("chat:read", { messageId: latestUnread.id });
   }, [clientId, isChatOpen, roomState?.chatMessages, emitAction]);
 
@@ -483,6 +546,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
     setInlineError(null);
     setInlineNotice("Sending video to the room...");
+    markPendingLocalSync("video:set");
     emitAction("video:set", { videoId });
     setInputUrl("");
   }
@@ -520,6 +584,28 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     }
 
     setTypingState(false);
+    setRoomState((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        chatMessages: [
+          ...current.chatMessages,
+          {
+            id: `pending-${crypto.randomUUID()}`,
+            clientId,
+            authorName: displayName,
+            authorImage: viewer.image ?? null,
+            body: value,
+            sentAt: Date.now(),
+            readByClientIds: [clientId]
+          }
+        ].slice(-100)
+      };
+    });
+    markPendingLocalSync("chat:message");
     emitAction("chat:message", { body: value });
     setChatDraft("");
     setIsChatOpen(true);
