@@ -1530,6 +1530,14 @@ html[data-theme="dark"] .status-pill {
   inset: 0;
 }
 
+.video-control-guard {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: transparent;
+  cursor: not-allowed;
+}
+
 .video-placeholder {
   position: absolute;
   inset: 0;

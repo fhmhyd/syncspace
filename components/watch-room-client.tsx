@@ -881,15 +881,11 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
             <div className="player-stage">
               <div id="youtube-player" />
               {roomState?.videoId && !canControlPlayback ? (
-                <div className="video-placeholder">
-                  <div>
-                    <h2 style={{ marginTop: 0 }}>Viewer mode</h2>
-                    <p className="muted">
-                      {roomState.playbackControllerName ?? "The current controller"} is controlling this
-                      video. Paste a YouTube link and press Sync video to take over with your own video.
-                    </p>
-                  </div>
-                </div>
+                <div
+                  className="video-control-guard"
+                  aria-label="Viewer mode active"
+                  title={`${roomState.playbackControllerName ?? "The current controller"} controls this video`}
+                />
               ) : null}
             </div>
             {!roomState?.videoId ? (
@@ -938,6 +934,12 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           {roomState?.videoId ? (
             <p className="muted small room-active-video">
               Active video ID: {roomState.videoId}
+            </p>
+          ) : null}
+          {roomState?.videoId && !canControlPlayback ? (
+            <p className="muted small room-active-video">
+              Viewer mode: {roomState.playbackControllerName ?? "The current controller"} is controlling this
+              video. Paste a new YouTube link and press Sync video if you want to take over with your own video.
             </p>
           ) : null}
         </section>
