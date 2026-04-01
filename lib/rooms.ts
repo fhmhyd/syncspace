@@ -38,6 +38,7 @@ export type RoomState = {
   videoId: string | null;
   playbackState: PlaybackState;
   currentTimeSeconds: number;
+  playbackUpdatedAt: number;
   updatedAt: number;
   createdAt: number;
   emptySinceAt?: number | null;
@@ -198,6 +199,7 @@ export class RoomStore {
       videoId: null,
       playbackState: "paused",
       currentTimeSeconds: 0,
+      playbackUpdatedAt: createdAt,
       updatedAt: createdAt,
       createdAt,
       emptySinceAt: null,
@@ -257,7 +259,7 @@ export class RoomStore {
   private async updateRoom(
     roomId: string,
     updater: (room: RoomState) => void,
-    options: { touchUpdatedAt?: boolean } = {}
+    options: { touchUpdatedAt?: boolean; touchPlaybackUpdatedAt?: boolean } = {}
   ): Promise<RoomState> {
     const kvStore = getKvStore();
     const room = await this.getRoom(roomId);
@@ -267,6 +269,9 @@ export class RoomStore {
     updater(room);
     if (options.touchUpdatedAt ?? true) {
       room.updatedAt = Date.now();
+    }
+    if (options.touchPlaybackUpdatedAt) {
+      room.playbackUpdatedAt = Date.now();
     }
     await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: ROOM_TTL_SECONDS });
     return room;
@@ -364,35 +369,51 @@ export class RoomStore {
   }
 
   async updateVideo(roomId: string, clientId: string, videoId: string): Promise<RoomState> {
-    return this.updateRoom(roomId, (room) => {
-      this.requireMember(room, clientId);
-      room.videoId = videoId;
-      room.playbackState = "playing";
-      room.currentTimeSeconds = 0;
-    });
+    return this.updateRoom(
+      roomId,
+      (room) => {
+        this.requireMember(room, clientId);
+        room.videoId = videoId;
+        room.playbackState = "playing";
+        room.currentTimeSeconds = 0;
+      },
+      { touchPlaybackUpdatedAt: true }
+    );
   }
 
   async play(roomId: string, clientId: string, currentTimeSeconds: number): Promise<RoomState> {
-    return this.updateRoom(roomId, (room) => {
-      this.requireMember(room, clientId);
-      room.playbackState = "playing";
-      room.currentTimeSeconds = clampTime(currentTimeSeconds);
-    });
+    return this.updateRoom(
+      roomId,
+      (room) => {
+        this.requireMember(room, clientId);
+        room.playbackState = "playing";
+        room.currentTimeSeconds = clampTime(currentTimeSeconds);
+      },
+      { touchPlaybackUpdatedAt: true }
+    );
   }
 
   async pause(roomId: string, clientId: string, currentTimeSeconds: number): Promise<RoomState> {
-    return this.updateRoom(roomId, (room) => {
-      this.requireMember(room, clientId);
-      room.playbackState = "paused";
-      room.currentTimeSeconds = clampTime(currentTimeSeconds);
-    });
+    return this.updateRoom(
+      roomId,
+      (room) => {
+        this.requireMember(room, clientId);
+        room.playbackState = "paused";
+        room.currentTimeSeconds = clampTime(currentTimeSeconds);
+      },
+      { touchPlaybackUpdatedAt: true }
+    );
   }
 
   async seek(roomId: string, clientId: string, currentTimeSeconds: number): Promise<RoomState> {
-    return this.updateRoom(roomId, (room) => {
-      this.requireMember(room, clientId);
-      room.currentTimeSeconds = clampTime(currentTimeSeconds);
-    });
+    return this.updateRoom(
+      roomId,
+      (room) => {
+        this.requireMember(room, clientId);
+        room.currentTimeSeconds = clampTime(currentTimeSeconds);
+      },
+      { touchPlaybackUpdatedAt: true }
+    );
   }
 
   async addChatMessage(roomId: string, clientId: string, body: string): Promise<RoomState> {

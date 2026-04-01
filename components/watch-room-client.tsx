@@ -57,14 +57,14 @@ declare global {
 
 const TIME_DRIFT_TOLERANCE = 0.45;
 const PLAYBACK_APPLY_TOLERANCE = 0.25;
-const SEEK_EMIT_THROTTLE_MS = 250;
+const SEEK_EMIT_THROTTLE_MS = 180;
 const PLAYER_SUPPRESS_MS = 900;
-const SEEK_DETECTION_THRESHOLD = 0.45;
-const PAUSED_SEEK_DETECTION_THRESHOLD = 0.2;
-const SYNC_INTERVAL_MS = 180;
+const SEEK_DETECTION_THRESHOLD = 0.3;
+const PAUSED_SEEK_DETECTION_THRESHOLD = 0.12;
+const SYNC_INTERVAL_MS = 120;
 const CHAT_TYPING_IDLE_MS = 1200;
 const PRESENCE_HEARTBEAT_MS = 10_000;
-const LOCAL_CONTROL_LOCK_MS = 1_500;
+const LOCAL_CONTROL_LOCK_MS = 900;
 
 type Props = {
   roomId: string;
@@ -105,7 +105,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     videoId: string | null;
     playbackState: RoomStatePayload["playbackState"];
     currentTimeSeconds: number;
-    updatedAt: number;
+    playbackUpdatedAt: number;
   } | null>(null);
   const playbackSnapshotRef = useRef<{
     currentTimeSeconds: number;
@@ -219,7 +219,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       videoId: nextState.videoId,
       playbackState: nextState.playbackState,
       currentTimeSeconds: nextState.currentTimeSeconds,
-      updatedAt: nextState.updatedAt
+      playbackUpdatedAt: nextState.playbackUpdatedAt
     };
   }, []);
 
@@ -406,7 +406,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           pendingLocalSyncRef.current.syncEvent === "playback:pause" ||
           pendingLocalSyncRef.current.syncEvent === "playback:seek") &&
         now - pendingLocalSyncRef.current.issuedAt < LOCAL_CONTROL_LOCK_MS &&
-        roomState.updatedAt < pendingLocalSyncRef.current.issuedAt;
+        roomState.playbackUpdatedAt < pendingLocalSyncRef.current.issuedAt;
 
       if (roomState.playbackState === "playing") {
         if (driftSeconds > TIME_DRIFT_TOLERANCE && !hasPendingLocalPlayback) {
@@ -471,7 +471,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       previousApplied.videoId !== roomState.videoId ||
       previousApplied.playbackState !== roomState.playbackState ||
       Math.abs(previousApplied.currentTimeSeconds - roomState.currentTimeSeconds) > PLAYBACK_APPLY_TOLERANCE ||
-      previousApplied.updatedAt !== roomState.updatedAt
+      previousApplied.playbackUpdatedAt !== roomState.playbackUpdatedAt
     ) {
       applyRoomStateToPlayer(roomState);
     }
@@ -996,7 +996,7 @@ function shouldApplyIncomingPlayback(
     previousState.videoId !== nextState.videoId ||
     previousState.playbackState !== nextState.playbackState ||
     Math.abs(previousState.currentTimeSeconds - nextState.currentTimeSeconds) > PLAYBACK_APPLY_TOLERANCE ||
-    previousState.updatedAt !== nextState.updatedAt
+    previousState.playbackUpdatedAt !== nextState.playbackUpdatedAt
   );
 }
 
@@ -1073,6 +1073,6 @@ function getExpectedRoomTime(roomState: RoomStatePayload): number {
   if (roomState.playbackState !== "playing") {
     return roomState.currentTimeSeconds;
   }
-  const elapsedSeconds = (Date.now() - roomState.updatedAt) / 1000;
+  const elapsedSeconds = (Date.now() - roomState.playbackUpdatedAt) / 1000;
   return Math.max(0, roomState.currentTimeSeconds + elapsedSeconds);
 }
