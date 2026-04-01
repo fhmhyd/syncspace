@@ -66,6 +66,7 @@ const PRESENCE_HEARTBEAT_MS = 10_000;
 const LOCAL_CONTROL_LOCK_MS = 900;
 const HARD_RESYNC_DRIFT_SECONDS = 1.15;
 const SOFT_RESYNC_DRIFT_SECONDS = 0.55;
+const DIRECT_PLAYBACK_DEDUPE_MS = 2000;
 
 type Props = {
   roomId: string;
@@ -143,6 +144,13 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     issuedAt: number;
   } | null>(null);
   const lastDirectPlaybackEventRef = useRef<string | null>(null);
+  const recentRemotePlaybackRef = useRef<{
+    action: DirectPlaybackCommandPayload["action"];
+    currentTimeSeconds: number;
+    videoId?: string | null;
+    playbackState: RoomStatePayload["playbackState"];
+    issuedAt: number;
+  } | null>(null);
   const canControlPlayback =
     !roomState?.videoId ||
     !roomState.playbackControllerUserId ||
@@ -358,6 +366,14 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
             player.pauseVideo();
           }
         });
+
+        recentRemotePlaybackRef.current = {
+          action: payload.action,
+          currentTimeSeconds: payload.currentTimeSeconds,
+          videoId: payload.videoId,
+          playbackState: payload.playbackState,
+          issuedAt: payload.issuedAt
+        };
       });
 
       channel.bind("room:state", (data: RoomChannelPayload) => {
@@ -378,7 +394,16 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         setInlineError(null);
         setInlineNotice(getRoomNotice(data, clientId));
         setConnectionLabel(getPresenceMessage(nextState.participants?.length || 0));
-        if (shouldApplyIncomingPlayback(previousState, nextState, data.syncEvent)) {
+        if (
+          shouldApplyIncomingPlayback(previousState, nextState, data.syncEvent) &&
+          !shouldSkipPlaybackApply({
+            syncedBy: data.syncedBy,
+            syncEvent: data.syncEvent,
+            clientId,
+            nextState,
+            recentRemotePlayback: recentRemotePlaybackRef.current
+          })
+        ) {
           applyRoomStateToPlayer(nextState);
         }
       });
@@ -626,16 +651,23 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     const previousApplied = lastAppliedPlaybackRef.current;
     roomStateRef.current = roomState;
     if (
-      !previousApplied ||
-      previousApplied.videoId !== roomState.videoId ||
-      previousApplied.playbackState !== roomState.playbackState ||
-      Math.abs(previousApplied.currentTimeSeconds - roomState.currentTimeSeconds) > PLAYBACK_APPLY_TOLERANCE ||
-      previousApplied.playbackUpdatedAt !== roomState.playbackUpdatedAt ||
-      previousApplied.playbackSequence !== roomState.playbackSequence
+      (!previousApplied ||
+        previousApplied.videoId !== roomState.videoId ||
+        previousApplied.playbackState !== roomState.playbackState ||
+        Math.abs(previousApplied.currentTimeSeconds - roomState.currentTimeSeconds) > PLAYBACK_APPLY_TOLERANCE ||
+        previousApplied.playbackUpdatedAt !== roomState.playbackUpdatedAt ||
+        previousApplied.playbackSequence !== roomState.playbackSequence) &&
+      !shouldSkipPlaybackApply({
+        syncedBy: undefined,
+        syncEvent: roomState.playbackCommand ?? undefined,
+        clientId,
+        nextState: roomState,
+        recentRemotePlayback: recentRemotePlaybackRef.current
+      })
     ) {
       applyRoomStateToPlayer(roomState);
     }
-  }, [applyRoomStateToPlayer, roomState]);
+  }, [applyRoomStateToPlayer, clientId, roomState]);
 
   useEffect(() => {
     if (!isChatOpen || !chatListRef.current) {
@@ -1160,6 +1192,54 @@ function getTypingLabel(names: string[]) {
 function getPresenceMessage(count: number): string {
   if (count >= 2) return "Both participants connected.";
   return "Waiting for the second participant...";
+}
+
+function shouldSkipPlaybackApply(input: {
+  syncedBy?: string;
+  syncEvent?: RoomChannelPayload["syncEvent"];
+  clientId: string;
+  nextState: RoomStatePayload;
+  recentRemotePlayback: {
+    action: DirectPlaybackCommandPayload["action"];
+    currentTimeSeconds: number;
+    videoId?: string | null;
+    playbackState: RoomStatePayload["playbackState"];
+    issuedAt: number;
+  } | null;
+}) {
+  const isPlaybackEvent =
+    input.syncEvent === "video:set" ||
+    input.syncEvent === "playback:play" ||
+    input.syncEvent === "playback:pause" ||
+    input.syncEvent === "playback:seek";
+
+  if (!isPlaybackEvent) {
+    return false;
+  }
+
+  if (input.syncedBy === input.clientId) {
+    return true;
+  }
+
+  if (!input.recentRemotePlayback) {
+    return false;
+  }
+
+  const ageMs = Date.now() - input.recentRemotePlayback.issuedAt;
+  if (ageMs > DIRECT_PLAYBACK_DEDUPE_MS) {
+    return false;
+  }
+
+  const sameAction = input.recentRemotePlayback.action === input.syncEvent;
+  const samePlaybackState =
+    input.recentRemotePlayback.playbackState === input.nextState.playbackState;
+  const sameVideo =
+    (input.recentRemotePlayback.videoId ?? input.nextState.videoId) === input.nextState.videoId;
+  const sameTime =
+    Math.abs(input.recentRemotePlayback.currentTimeSeconds - input.nextState.currentTimeSeconds) <
+    PLAYBACK_APPLY_TOLERANCE;
+
+  return sameAction && samePlaybackState && sameVideo && sameTime;
 }
 
 function shouldApplyIncomingPlayback(
