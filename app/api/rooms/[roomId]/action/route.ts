@@ -11,6 +11,7 @@ type RoomActionRequestBody = {
   image?: string | null;
   videoId?: string;
   currentTimeSeconds?: number;
+  mode?: "shared" | "owner";
   body?: string;
   messageId?: string;
   isTyping?: boolean;
@@ -119,36 +120,82 @@ export async function POST(
         break;
       }
       case "video:set":
+        if (!session?.user) {
+          return NextResponse.json(
+            { code: "UNAUTHORIZED", message: "You need to sign in with Google before controlling playback." },
+            { status: 401 }
+          );
+        }
         nextState = await store.updateVideo(
           roomId,
           clientId,
+          session.user.id,
           validateActionString(actionData.videoId, "A video ID is required.")
         );
         await broadcastRoomState(roomId, nextState, { syncedBy: clientId, syncEvent: "video:set" });
         break;
       case "playback:play":
+        if (!session?.user) {
+          return NextResponse.json(
+            { code: "UNAUTHORIZED", message: "You need to sign in with Google before controlling playback." },
+            { status: 401 }
+          );
+        }
         nextState = await store.play(
           roomId,
           clientId,
+          session.user.id,
           validateActionNumber(actionData.currentTimeSeconds)
         );
         await broadcastRoomState(roomId, nextState, { syncedBy: clientId, syncEvent: "playback:play" });
         break;
       case "playback:pause":
+        if (!session?.user) {
+          return NextResponse.json(
+            { code: "UNAUTHORIZED", message: "You need to sign in with Google before controlling playback." },
+            { status: 401 }
+          );
+        }
         nextState = await store.pause(
           roomId,
           clientId,
+          session.user.id,
           validateActionNumber(actionData.currentTimeSeconds)
         );
         await broadcastRoomState(roomId, nextState, { syncedBy: clientId, syncEvent: "playback:pause" });
         break;
       case "playback:seek":
+        if (!session?.user) {
+          return NextResponse.json(
+            { code: "UNAUTHORIZED", message: "You need to sign in with Google before controlling playback." },
+            { status: 401 }
+          );
+        }
         nextState = await store.seek(
           roomId,
           clientId,
+          session.user.id,
           validateActionNumber(actionData.currentTimeSeconds)
         );
         await broadcastRoomState(roomId, nextState, { syncedBy: clientId, syncEvent: "playback:seek" });
+        break;
+      case "playback:mode":
+        if (!session?.user) {
+          return NextResponse.json(
+            { code: "UNAUTHORIZED", message: "You need to sign in with Google before controlling playback." },
+            { status: 401 }
+          );
+        }
+        if (actionData.mode !== "shared" && actionData.mode !== "owner") {
+          throw new RoomError("INVALID_ROOM_MEMBER", "Playback mode must be shared or host-only.");
+        }
+        nextState = await store.setPlaybackControlMode(
+          roomId,
+          clientId,
+          session.user.id,
+          actionData.mode
+        );
+        await broadcastRoomState(roomId, nextState, { syncedBy: clientId, syncEvent: "playback:mode" });
         break;
       case "chat:message":
         nextState = await store.addChatMessage(

@@ -55,16 +55,17 @@ declare global {
   }
 }
 
-const TIME_DRIFT_TOLERANCE = 0.45;
 const PLAYBACK_APPLY_TOLERANCE = 0.25;
 const SEEK_EMIT_THROTTLE_MS = 180;
-const PLAYER_SUPPRESS_MS = 900;
+const PLAYER_SUPPRESS_MS = 1200;
 const SEEK_DETECTION_THRESHOLD = 0.3;
 const PAUSED_SEEK_DETECTION_THRESHOLD = 0.12;
 const SYNC_INTERVAL_MS = 120;
 const CHAT_TYPING_IDLE_MS = 1200;
 const PRESENCE_HEARTBEAT_MS = 10_000;
 const LOCAL_CONTROL_LOCK_MS = 900;
+const HARD_RESYNC_DRIFT_SECONDS = 1.15;
+const SOFT_RESYNC_DRIFT_SECONDS = 0.55;
 
 type Props = {
   roomId: string;
@@ -101,11 +102,13 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   const joinedRef = useRef(false);
   const roomStateRef = useRef<RoomStatePayload | null>(null);
   const playerReadyRef = useRef(false);
+  const driftWarningCountRef = useRef(0);
   const lastAppliedPlaybackRef = useRef<{
     videoId: string | null;
     playbackState: RoomStatePayload["playbackState"];
     currentTimeSeconds: number;
     playbackUpdatedAt: number;
+    playbackSequence: number;
   } | null>(null);
   const playbackSnapshotRef = useRef<{
     currentTimeSeconds: number;
@@ -127,13 +130,29 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
   const emitAction = useCallback(async (action: string, payload: Record<string, unknown> = {}) => {
     try {
-      await fetch(`/api/rooms/${roomId}/action`, {
+      const response = await fetch(`/api/rooms/${roomId}/action`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, clientId, ...payload })
       });
+
+      if (!response.ok) {
+        const errorPayload = (await response.json().catch(() => null)) as
+          | { message?: string; error?: string }
+          | null;
+        const message =
+          errorPayload?.message ?? errorPayload?.error ?? "The room action failed.";
+        setInlineNotice(null);
+        setInlineError(message);
+        return null;
+      }
+
+      return response;
     } catch (e) {
       console.error(e);
+      setInlineNotice(null);
+      setInlineError("The room action failed. Please try again.");
+      return null;
     }
   }, [roomId, clientId]);
 
@@ -186,6 +205,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     if (nextState.videoId && knownVideoIdRef.current !== nextState.videoId) {
       const videoId = nextState.videoId;
       knownVideoIdRef.current = videoId;
+      driftWarningCountRef.current = 0;
       runWithSuppressedPlayerEvents(() => {
         player.loadVideoById(videoId, getExpectedRoomTime(nextState));
         window.setTimeout(() => {
@@ -201,7 +221,14 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
     const expectedTimeSeconds = getExpectedRoomTime(nextState);
     const localTime = player.getCurrentTime();
-    if (Math.abs(localTime - expectedTimeSeconds) > PLAYBACK_APPLY_TOLERANCE) {
+    const driftSeconds = Math.abs(localTime - expectedTimeSeconds);
+
+    if (
+      nextState.playbackState === "paused" ||
+      nextState.playbackCommand === "playback:seek" ||
+      nextState.playbackCommand === "video:set" ||
+      driftSeconds > PLAYBACK_APPLY_TOLERANCE
+    ) {
       runWithSuppressedPlayerEvents(() => {
         player.seekTo(expectedTimeSeconds, true);
       });
@@ -219,7 +246,8 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       videoId: nextState.videoId,
       playbackState: nextState.playbackState,
       currentTimeSeconds: nextState.currentTimeSeconds,
-      playbackUpdatedAt: nextState.playbackUpdatedAt
+      playbackUpdatedAt: nextState.playbackUpdatedAt,
+      playbackSequence: nextState.playbackSequence
     };
   }, []);
 
@@ -261,6 +289,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         roomStateRef.current = nextState;
         setRoomState(nextState);
         setJoinError(null);
+        setInlineError(null);
         setInlineNotice(getRoomNotice(data, clientId));
         setConnectionLabel(getPresenceMessage(nextState.participants?.length || 0));
         if (shouldApplyIncomingPlayback(previousState, nextState, data.syncEvent)) {
@@ -409,11 +438,23 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         roomState.playbackUpdatedAt < pendingLocalSyncRef.current.issuedAt;
 
       if (roomState.playbackState === "playing") {
-        if (driftSeconds > TIME_DRIFT_TOLERANCE && !hasPendingLocalPlayback) {
+        if (driftSeconds > HARD_RESYNC_DRIFT_SECONDS && !hasPendingLocalPlayback) {
+          driftWarningCountRef.current = 0;
           runWithSuppressedPlayerEvents(() => {
             playerRef.current?.seekTo(expectedTimeSeconds, true);
             playerRef.current?.playVideo();
           });
+        } else if (driftSeconds > SOFT_RESYNC_DRIFT_SECONDS && !hasPendingLocalPlayback) {
+          driftWarningCountRef.current += 1;
+          if (driftWarningCountRef.current >= 2) {
+            driftWarningCountRef.current = 0;
+            runWithSuppressedPlayerEvents(() => {
+              playerRef.current?.seekTo(expectedTimeSeconds, true);
+              playerRef.current?.playVideo();
+            });
+          }
+        } else {
+          driftWarningCountRef.current = 0;
         }
 
         if (previousSnapshot && now - lastSeekEmitAtRef.current >= SEEK_EMIT_THROTTLE_MS) {
@@ -427,6 +468,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           }
         }
       } else {
+        driftWarningCountRef.current = 0;
         if (driftSeconds > PLAYBACK_APPLY_TOLERANCE && !hasPendingLocalPlayback) {
           runWithSuppressedPlayerEvents(() => {
             playerRef.current?.seekTo(expectedTimeSeconds, true);
@@ -471,7 +513,8 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       previousApplied.videoId !== roomState.videoId ||
       previousApplied.playbackState !== roomState.playbackState ||
       Math.abs(previousApplied.currentTimeSeconds - roomState.currentTimeSeconds) > PLAYBACK_APPLY_TOLERANCE ||
-      previousApplied.playbackUpdatedAt !== roomState.playbackUpdatedAt
+      previousApplied.playbackUpdatedAt !== roomState.playbackUpdatedAt ||
+      previousApplied.playbackSequence !== roomState.playbackSequence
     ) {
       applyRoomStateToPlayer(roomState);
     }
@@ -632,6 +675,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   }
 
   const participants = roomState?.participants ?? [];
+  const isOwner = roomState?.ownerUserId === viewer.id;
   const indicatorClass = participants.length >= 2 ? "success" : joinError ? "danger" : "";
   const visibleChatMessages = roomState?.chatMessages ?? [];
   const unreadCount = visibleChatMessages.filter(
@@ -695,6 +739,27 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
             <span className="room-account muted small">
               Signed in as {displayName} - {viewer.email ?? viewer.googleName}
             </span>
+            <span className="status-pill">
+              <span className={`status-dot ${roomState?.playbackControlMode === "owner" ? "success" : ""}`} />
+              {roomState?.playbackControlMode === "owner"
+                ? "Host controls playback"
+                : "Shared playback control"}
+            </span>
+            {isOwner ? (
+              <button
+                className="button-secondary"
+                type="button"
+                onClick={() =>
+                  emitAction("playback:mode", {
+                    mode: roomState?.playbackControlMode === "owner" ? "shared" : "owner"
+                  })
+                }
+              >
+                {roomState?.playbackControlMode === "owner"
+                  ? "Switch to shared control"
+                  : "Switch to host control"}
+              </button>
+            ) : null}
           </div>
           {inlineError ? <span className="error-text small room-inline-message">{inlineError}</span> : null}
           {inlineNotice ? <span className="small muted room-inline-message">{inlineNotice}</span> : null}
@@ -993,6 +1058,7 @@ function shouldApplyIncomingPlayback(
   }
 
   return (
+    previousState.playbackSequence !== nextState.playbackSequence ||
     previousState.videoId !== nextState.videoId ||
     previousState.playbackState !== nextState.playbackState ||
     Math.abs(previousState.currentTimeSeconds - nextState.currentTimeSeconds) > PLAYBACK_APPLY_TOLERANCE ||
@@ -1021,6 +1087,12 @@ function getRoomNotice(roomStatePayload: RoomChannelPayload, clientId: string): 
         ? "Your display name was updated."
         : `${actor} updated their display name.`;
     }
+  }
+
+  if (roomStatePayload.syncEvent === "playback:mode") {
+    return roomState.playbackControlMode === "owner"
+      ? "Playback is now controlled by the host."
+      : "Playback control is now shared.";
   }
 
   return null;

@@ -3,6 +3,12 @@ import { kv } from "@vercel/kv";
 import { createClient } from "redis";
 
 export type PlaybackState = "playing" | "paused";
+export type PlaybackCommand =
+  | "video:set"
+  | "playback:play"
+  | "playback:pause"
+  | "playback:seek";
+export type PlaybackControlMode = "shared" | "owner";
 
 export type Participant = {
   clientId: string;
@@ -39,6 +45,9 @@ export type RoomState = {
   playbackState: PlaybackState;
   currentTimeSeconds: number;
   playbackUpdatedAt: number;
+  playbackSequence: number;
+  playbackCommand: PlaybackCommand | null;
+  playbackControlMode: PlaybackControlMode;
   updatedAt: number;
   createdAt: number;
   emptySinceAt?: number | null;
@@ -200,6 +209,9 @@ export class RoomStore {
       playbackState: "paused",
       currentTimeSeconds: 0,
       playbackUpdatedAt: createdAt,
+      playbackSequence: 0,
+      playbackCommand: null,
+      playbackControlMode: "shared",
       updatedAt: createdAt,
       createdAt,
       emptySinceAt: null,
@@ -215,10 +227,11 @@ export class RoomStore {
 
   async getRoom(roomId: string): Promise<RoomState | null> {
     const kvStore = getKvStore();
-    const room = await kvStore.get<RoomState>(`${ROOM_PREFIX}${roomId}`);
-    if (!room) {
+    const storedRoom = await kvStore.get<RoomState>(`${ROOM_PREFIX}${roomId}`);
+    if (!storedRoom) {
       return null;
     }
+    const room = normalizeRoomState(storedRoom);
 
     const { room: cleanedRoom, changed, shouldDelete } = cleanupRoomPresence(room);
     if (shouldDelete) {
@@ -259,7 +272,11 @@ export class RoomStore {
   private async updateRoom(
     roomId: string,
     updater: (room: RoomState) => void,
-    options: { touchUpdatedAt?: boolean; touchPlaybackUpdatedAt?: boolean } = {}
+    options: {
+      touchUpdatedAt?: boolean;
+      touchPlaybackUpdatedAt?: boolean;
+      playbackCommand?: PlaybackCommand;
+    } = {}
   ): Promise<RoomState> {
     const kvStore = getKvStore();
     const room = await this.getRoom(roomId);
@@ -272,6 +289,8 @@ export class RoomStore {
     }
     if (options.touchPlaybackUpdatedAt) {
       room.playbackUpdatedAt = Date.now();
+      room.playbackSequence += 1;
+      room.playbackCommand = options.playbackCommand ?? room.playbackCommand;
     }
     await kvStore.set(`${ROOM_PREFIX}${roomId}`, room, { ex: ROOM_TTL_SECONDS });
     return room;
@@ -368,52 +387,87 @@ export class RoomStore {
     return room;
   }
 
-  async updateVideo(roomId: string, clientId: string, videoId: string): Promise<RoomState> {
+  async updateVideo(
+    roomId: string,
+    clientId: string,
+    userId: string,
+    videoId: string
+  ): Promise<RoomState> {
     return this.updateRoom(
       roomId,
       (room) => {
-        this.requireMember(room, clientId);
+        this.requirePlaybackAuthority(room, clientId, userId);
         room.videoId = videoId;
         room.playbackState = "playing";
         room.currentTimeSeconds = 0;
       },
-      { touchPlaybackUpdatedAt: true }
+      { touchPlaybackUpdatedAt: true, playbackCommand: "video:set" }
     );
   }
 
-  async play(roomId: string, clientId: string, currentTimeSeconds: number): Promise<RoomState> {
+  async play(
+    roomId: string,
+    clientId: string,
+    userId: string,
+    currentTimeSeconds: number
+  ): Promise<RoomState> {
     return this.updateRoom(
       roomId,
       (room) => {
-        this.requireMember(room, clientId);
+        this.requirePlaybackAuthority(room, clientId, userId);
         room.playbackState = "playing";
         room.currentTimeSeconds = clampTime(currentTimeSeconds);
       },
-      { touchPlaybackUpdatedAt: true }
+      { touchPlaybackUpdatedAt: true, playbackCommand: "playback:play" }
     );
   }
 
-  async pause(roomId: string, clientId: string, currentTimeSeconds: number): Promise<RoomState> {
+  async pause(
+    roomId: string,
+    clientId: string,
+    userId: string,
+    currentTimeSeconds: number
+  ): Promise<RoomState> {
     return this.updateRoom(
       roomId,
       (room) => {
-        this.requireMember(room, clientId);
+        this.requirePlaybackAuthority(room, clientId, userId);
         room.playbackState = "paused";
         room.currentTimeSeconds = clampTime(currentTimeSeconds);
       },
-      { touchPlaybackUpdatedAt: true }
+      { touchPlaybackUpdatedAt: true, playbackCommand: "playback:pause" }
     );
   }
 
-  async seek(roomId: string, clientId: string, currentTimeSeconds: number): Promise<RoomState> {
+  async seek(
+    roomId: string,
+    clientId: string,
+    userId: string,
+    currentTimeSeconds: number
+  ): Promise<RoomState> {
     return this.updateRoom(
       roomId,
       (room) => {
-        this.requireMember(room, clientId);
+        this.requirePlaybackAuthority(room, clientId, userId);
         room.currentTimeSeconds = clampTime(currentTimeSeconds);
       },
-      { touchPlaybackUpdatedAt: true }
+      { touchPlaybackUpdatedAt: true, playbackCommand: "playback:seek" }
     );
+  }
+
+  async setPlaybackControlMode(
+    roomId: string,
+    clientId: string,
+    userId: string,
+    mode: PlaybackControlMode
+  ): Promise<RoomState> {
+    return this.updateRoom(roomId, (room) => {
+      this.requireMember(room, clientId);
+      if (room.ownerUserId !== userId) {
+        throw new RoomError("INVALID_ROOM_MEMBER", "Only the space host can change playback control mode.");
+      }
+      room.playbackControlMode = mode;
+    });
   }
 
   async addChatMessage(roomId: string, clientId: string, body: string): Promise<RoomState> {
@@ -495,6 +549,17 @@ export class RoomStore {
       throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
     }
   }
+
+  private requirePlaybackAuthority(room: RoomState, clientId: string, userId: string): void {
+    this.requireMember(room, clientId);
+
+    if (room.playbackControlMode === "owner" && room.ownerUserId !== userId) {
+      throw new RoomError(
+        "INVALID_ROOM_MEMBER",
+        "Playback is currently controlled by the space host."
+      );
+    }
+  }
 }
 
 function cleanupRoomPresence(
@@ -554,6 +619,17 @@ function cleanupRoomPresence(
       participants: activeParticipants,
       typingParticipants: nextTypingParticipants
     }
+  };
+}
+
+function normalizeRoomState(room: RoomState): RoomState {
+  return {
+    ...room,
+    playbackUpdatedAt:
+      Number.isFinite(room.playbackUpdatedAt) ? room.playbackUpdatedAt : room.updatedAt ?? room.createdAt,
+    playbackSequence: Number.isFinite(room.playbackSequence) ? room.playbackSequence : 0,
+    playbackCommand: room.playbackCommand ?? null,
+    playbackControlMode: room.playbackControlMode ?? "shared"
   };
 }
 

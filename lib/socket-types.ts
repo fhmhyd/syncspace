@@ -54,6 +54,7 @@ export type RoomStatePayload = RoomState & {
     | "playback:play"
     | "playback:pause"
     | "playback:seek"
+    | "playback:mode"
     | "participant:update"
     | "room:heartbeat"
     | "chat:message"
