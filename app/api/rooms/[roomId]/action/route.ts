@@ -11,7 +11,6 @@ type RoomActionRequestBody = {
   image?: string | null;
   videoId?: string;
   currentTimeSeconds?: number;
-  mode?: "shared" | "owner";
   body?: string;
   messageId?: string;
   isTyping?: boolean;
@@ -58,7 +57,7 @@ export async function POST(
       case "room:join": {
         // We use NextAuth session directly if signed in
         if (!session?.user) {
-          return NextResponse.json({ code: "UNAUTHORIZED", message: "You need to sign in with Google before joining a room." }, { status: 401 });
+          return NextResponse.json({ code: "UNAUTHORIZED", message: "You need to sign in with Google before joining a space." }, { status: 401 });
         }
         
         const previousRoom = await store.getRoom(roomId);
@@ -107,7 +106,7 @@ export async function POST(
       case "room:heartbeat": {
         if (!session?.user) {
           return NextResponse.json(
-            { code: "UNAUTHORIZED", message: "You need to sign in with Google before joining a room." },
+            { code: "UNAUTHORIZED", message: "You need to sign in with Google before joining a space." },
             { status: 401 }
           );
         }
@@ -178,24 +177,6 @@ export async function POST(
           validateActionNumber(actionData.currentTimeSeconds)
         );
         await broadcastRoomState(roomId, nextState, { syncedBy: clientId, syncEvent: "playback:seek" });
-        break;
-      case "playback:mode":
-        if (!session?.user) {
-          return NextResponse.json(
-            { code: "UNAUTHORIZED", message: "You need to sign in with Google before controlling playback." },
-            { status: 401 }
-          );
-        }
-        if (actionData.mode !== "shared" && actionData.mode !== "owner") {
-          throw new RoomError("INVALID_ROOM_MEMBER", "Playback mode must be shared or host-only.");
-        }
-        nextState = await store.setPlaybackControlMode(
-          roomId,
-          clientId,
-          session.user.id,
-          actionData.mode
-        );
-        await broadcastRoomState(roomId, nextState, { syncedBy: clientId, syncEvent: "playback:mode" });
         break;
       case "chat:message":
         nextState = await store.addChatMessage(

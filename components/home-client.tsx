@@ -84,7 +84,7 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
         error?: string;
       };
       if (!response.ok || !payload?.roomId) {
-        throw new Error(payload?.error ?? "Failed to create a room.");
+        throw new Error(payload?.error ?? "Failed to create a space.");
       }
 
       const nextRoomId = payload.roomId;
@@ -105,7 +105,7 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
       setIsCreateRoomOpen(false);
       window.location.href = `/room/${nextRoomId}`;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create a room.");
+      setError(err instanceof Error ? err.message : "Failed to create a space.");
     } finally {
       setIsCreating(false);
     }
@@ -195,8 +195,8 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
     <main className="home-shell">
       <header className="home-topbar panel">
         <div className="room-brand">
-          <span className="room-brand-mark">SyncScreen</span>
-          <span className="room-brand-meta">All rooms</span>
+          <span className="room-brand-mark">SyncSpace</span>
+          <span className="room-brand-meta">All spaces</span>
         </div>
         <div className="profile-actions">
           <ThemeToggle />
@@ -221,16 +221,16 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
       <section className="home-content">
         <div className="home-actions">
           <button className="button" type="button" onClick={() => setIsCreateRoomOpen(true)}>
-            Create room
+            Create space
           </button>
         </div>
         {error ? <p className="error-text small home-error">{error}</p> : null}
         {rooms.length === 0 ? (
           <section className="panel home-empty-state">
-            <span className="eyebrow">No rooms yet</span>
-            <h2>Start the first room</h2>
+            <span className="eyebrow">No spaces yet</span>
+            <h2>Start the first space</h2>
             <p className="muted">
-              Create a room with a title and it will appear here for everyone who signs in.
+              Create a space with a title and it will appear here for everyone who signs in.
             </p>
           </section>
         ) : (
@@ -255,13 +255,13 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
                       </span>
                     </div>
                     <span className="room-card-state">
-                      {room.participants.length >= 2 ? "Full room" : "Open seat"}
+                      {room.participants.length >= 2 ? "Full space" : "Open seat"}
                     </span>
                   </div>
                   <div className="room-card-body">
                     <div className="room-card-title-stack">
                       <strong>{room.title}</strong>
-                      <span>Click to join the room</span>
+                      <span>Click to join the space</span>
                     </div>
                     <div className="room-card-presence">
                       {Array.from({ length: 2 }).map((_, index) => {
@@ -288,7 +288,7 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
                   </div>
                   <div className="room-card-meta">
                     <span>{room.participants.length}/2 connected</span>
-                    <span>{room.ownerUserId === signedInViewer.id ? "Your room" : "Join room"}</span>
+                    <span>{room.ownerUserId === signedInViewer.id ? "Your space" : "Join space"}</span>
                   </div>
                 </a>
               );
@@ -320,7 +320,7 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
               </button>
             </div>
             <p className="muted">
-              This is the name people will see in your rooms. By default, we use your Google name.
+              This is the name people will see in your spaces. By default, we use your Google name.
             </p>
             <form className="field-stack" onSubmit={submitDisplayName}>
               <label htmlFor="display-name">Display name</label>
@@ -354,8 +354,8 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
           >
             <div className="modal-header">
               <div>
-                <span className="eyebrow">Create room</span>
-                <h2 id="create-room-dialog-title">Name your room</h2>
+                <span className="eyebrow">Create space</span>
+                <h2 id="create-room-dialog-title">Name your space</h2>
               </div>
               <button
                 className="button-secondary"
@@ -366,7 +366,7 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
               </button>
             </div>
             <p className="muted">
-              Pick a room title. The room will appear on the home page and open right after you
+              Pick a space title. The space will appear on the home page and open right after you
               create it.
             </p>
             <form
@@ -376,7 +376,7 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
                 void createRoom();
               }}
             >
-              <label htmlFor="room-title">Room title</label>
+              <label htmlFor="room-title">Space title</label>
               <input
                 id="room-title"
                 className="input"
@@ -389,7 +389,7 @@ export default function HomeClient({ callbackUrl, viewer, initialRooms }: Props)
               />
               <div className="cta-row">
                 <button className="button" type="submit" disabled={!roomTitle.trim() || isCreating}>
-                  {isCreating ? "Creating room..." : "Create room"}
+                  {isCreating ? "Creating space..." : "Create space"}
                 </button>
               </div>
             </form>

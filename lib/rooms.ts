@@ -8,8 +8,6 @@ export type PlaybackCommand =
   | "playback:play"
   | "playback:pause"
   | "playback:seek";
-export type PlaybackControlMode = "shared" | "owner";
-
 export type Participant = {
   clientId: string;
   userId: string;
@@ -33,6 +31,7 @@ export type ChatMessage = {
 export type TypingParticipant = {
   clientId: string;
   name: string;
+  lastTypedAt: number;
 };
 
 export type RoomState = {
@@ -47,7 +46,6 @@ export type RoomState = {
   playbackUpdatedAt: number;
   playbackSequence: number;
   playbackCommand: PlaybackCommand | null;
-  playbackControlMode: PlaybackControlMode;
   playbackControllerClientId: string | null;
   playbackControllerUserId: string | null;
   playbackControllerName: string | null;
@@ -81,6 +79,7 @@ const ROOMS_SET_KEY = "syncscreen:active_rooms";
 const ROOM_TTL_SECONDS = 60 * 60 * 24;
 const PARTICIPANT_STALE_MS = 25_000;
 const EMPTY_ROOM_GRACE_MS = 2 * 60_000;
+const TYPING_STALE_MS = 4_000;
 
 const useKv = Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
 const useRedisUrl = Boolean(process.env.REDIS_URL);
@@ -214,7 +213,6 @@ export class RoomStore {
       playbackUpdatedAt: createdAt,
       playbackSequence: 0,
       playbackCommand: null,
-      playbackControlMode: "shared",
       playbackControllerClientId: null,
       playbackControllerUserId: null,
       playbackControllerName: null,
@@ -287,7 +285,7 @@ export class RoomStore {
     const kvStore = getKvStore();
     const room = await this.getRoom(roomId);
     if (!room) {
-      throw new RoomError("ROOM_NOT_FOUND", "This room does not exist or has expired.");
+      throw new RoomError("ROOM_NOT_FOUND", "This space does not exist or has expired.");
     }
     updater(room);
     if (options.touchUpdatedAt ?? true) {
@@ -306,14 +304,14 @@ export class RoomStore {
     return this.updateRoom(roomId, (room) => {
       const normalizedName = participant.name.trim();
       if (!normalizedName) {
-        throw new RoomError("INVALID_ROOM_MEMBER", "A display name is required to join the room.");
+        throw new RoomError("INVALID_ROOM_MEMBER", "A display name is required to join the space.");
       }
 
       const existing = room.participants.find(
         (entry) => entry.clientId === participant.clientId || entry.userId === participant.userId
       );
       if (!existing && room.participants.length >= 2) {
-        throw new RoomError("ROOM_FULL", "This room already has two participants.");
+        throw new RoomError("ROOM_FULL", "This space already has two participants.");
       }
 
       if (existing) {
@@ -355,7 +353,7 @@ export class RoomStore {
         );
 
         if (!participant) {
-          throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
+          throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this space.");
         }
 
         room.participants = room.participants.map((entry) =>
@@ -465,27 +463,12 @@ export class RoomStore {
     );
   }
 
-  async setPlaybackControlMode(
-    roomId: string,
-    clientId: string,
-    userId: string,
-    mode: PlaybackControlMode
-  ): Promise<RoomState> {
-    return this.updateRoom(roomId, (room) => {
-      this.requireMember(room, clientId);
-      if (room.ownerUserId !== userId) {
-        throw new RoomError("INVALID_ROOM_MEMBER", "Only the space host can change playback control mode.");
-      }
-      room.playbackControlMode = mode;
-    });
-  }
-
   async addChatMessage(roomId: string, clientId: string, body: string): Promise<RoomState> {
     return this.updateRoom(roomId, (room) => {
       this.requireMember(room, clientId);
       const participant = room.participants.find((entry) => entry.clientId === clientId);
       if (!participant) {
-        throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
+        throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this space.");
       }
 
       const normalizedBody = normalizeChatBody(body);
@@ -536,15 +519,27 @@ export class RoomStore {
       this.requireMember(room, clientId);
       const participant = room.participants.find((entry) => entry.clientId === clientId);
       if (!participant) {
-        throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
+        throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this space.");
       }
 
       if (isTyping) {
+        const lastTypedAt = Date.now();
         const existing = room.typingParticipants.find((entry) => entry.clientId === clientId);
-        if (!existing) {
+        if (existing) {
+          room.typingParticipants = room.typingParticipants.map((entry) =>
+            entry.clientId === clientId
+              ? {
+                  ...entry,
+                  name: participant.name,
+                  lastTypedAt
+                }
+              : entry
+          );
+        } else {
           room.typingParticipants.push({
             clientId,
-            name: participant.name
+            name: participant.name,
+            lastTypedAt
           });
         }
       } else {
@@ -556,7 +551,7 @@ export class RoomStore {
   private requireMember(room: RoomState, clientId: string): void {
     const isMember = (room.participants || []).some((entry) => entry.clientId === clientId);
     if (!isMember) {
-      throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
+      throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this space.");
     }
   }
 
@@ -566,7 +561,7 @@ export class RoomStore {
     );
 
     if (!participant) {
-      throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this room.");
+      throw new RoomError("INVALID_ROOM_MEMBER", "You are not connected to this space.");
     }
 
     return participant;
@@ -574,13 +569,6 @@ export class RoomStore {
 
   private requirePlaybackAuthority(room: RoomState, clientId: string, userId: string): void {
     this.requireMember(room, clientId);
-
-    if (room.playbackControlMode === "owner" && room.ownerUserId !== userId) {
-      throw new RoomError(
-        "INVALID_ROOM_MEMBER",
-        "Playback is currently controlled by the space host."
-      );
-    }
 
     if (
       room.playbackControllerUserId &&
@@ -623,7 +611,10 @@ function cleanupRoomPresence(
     : activeParticipants[0]?.clientId ?? null;
 
   const nextTypingParticipants = room.typingParticipants.filter(
-    (participant) => !removedClientIds.has(participant.clientId)
+    (participant) =>
+      !removedClientIds.has(participant.clientId) &&
+      Number.isFinite(participant.lastTypedAt) &&
+      now - participant.lastTypedAt <= TYPING_STALE_MS
   );
   const nextEmptySinceAt =
     activeParticipants.length === 0 ? room.emptySinceAt ?? now : null;
@@ -662,7 +653,6 @@ function normalizeRoomState(room: RoomState): RoomState {
       Number.isFinite(room.playbackUpdatedAt) ? room.playbackUpdatedAt : room.updatedAt ?? room.createdAt,
     playbackSequence: Number.isFinite(room.playbackSequence) ? room.playbackSequence : 0,
     playbackCommand: room.playbackCommand ?? null,
-    playbackControlMode: room.playbackControlMode ?? "shared",
     playbackControllerClientId: room.playbackControllerClientId ?? null,
     playbackControllerUserId: room.playbackControllerUserId ?? null,
     playbackControllerName: room.playbackControllerName ?? null
@@ -679,7 +669,7 @@ function clampTime(value: number): number {
 function normalizeRoomTitle(value: string): string {
   const trimmed = value.trim().slice(0, 48);
   if (!trimmed) {
-    throw new RoomError("INVALID_ROOM_MEMBER", "A room title is required.");
+    throw new RoomError("INVALID_ROOM_MEMBER", "A space title is required.");
   }
   return trimmed;
 }

@@ -61,10 +61,13 @@ const PLAYER_SUPPRESS_MS = 1200;
 const PLAYER_TIMELINE_POLL_MS = 250;
 const VIEWER_SYNC_INTERVAL_MS = 300;
 const CHAT_TYPING_IDLE_MS = 1200;
+const CHAT_TYPING_STALE_MS = 4000;
 const PRESENCE_HEARTBEAT_MS = 10_000;
 const HARD_RESYNC_DRIFT_SECONDS = 1.15;
 const SOFT_RESYNC_DRIFT_SECONDS = 0.55;
 const DIRECT_PLAYBACK_DEDUPE_MS = 2000;
+const HOST_SEEK_DETECTION_DELTA_SECONDS = 1.1;
+const HOST_SEEK_EMIT_COOLDOWN_MS = 650;
 
 type Props = {
   roomId: string;
@@ -106,10 +109,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   const [roomState, setRoomState] = useState<RoomStatePayload | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatDraft, setChatDraft] = useState("");
-  const [playerDuration, setPlayerDuration] = useState(0);
-  const [playerPosition, setPlayerPosition] = useState(0);
-  const [scrubValue, setScrubValue] = useState(0);
-  const [isScrubbing, setIsScrubbing] = useState(false);
+  const [typingTick, setTypingTick] = useState(0);
 
   const pusherRef = useRef<Pusher | null>(null);
   const realtimeChannelRef = useRef<RealtimePlaybackChannel | null>(null);
@@ -129,6 +129,10 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   } | null>(null);
   const chatListRef = useRef<HTMLDivElement | null>(null);
   const typingStopTimeoutRef = useRef<number | null>(null);
+  const typingActiveRef = useRef(false);
+  const hostPlaybackStateRef = useRef<RoomStatePayload["playbackState"]>("paused");
+  const hostSeekSampleRef = useRef<{ time: number; sampledAt: number } | null>(null);
+  const lastHostSeekEmitAtRef = useRef(0);
   const pendingLocalSyncRef = useRef<{
     syncEvent:
       | "video:set"
@@ -153,8 +157,6 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     roomState.playbackControllerUserId === viewer.id ||
     roomState.playbackControllerClientId === clientId;
 
-  const displayedPosition = isScrubbing ? scrubValue : playerPosition;
-
   const emitAction = useCallback(async (action: string, payload: Record<string, unknown> = {}) => {
     try {
       const response = await fetch(`/api/rooms/${roomId}/action`, {
@@ -168,7 +170,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           | { message?: string; error?: string }
           | null;
         const message =
-          errorPayload?.message ?? errorPayload?.error ?? "The room action failed.";
+          errorPayload?.message ?? errorPayload?.error ?? "The space action failed.";
         setInlineNotice(null);
         setInlineError(message);
         return null;
@@ -178,7 +180,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     } catch (e) {
       console.error(e);
       setInlineNotice(null);
-      setInlineError("The room action failed. Please try again.");
+      setInlineError("The space action failed. Please try again.");
       return null;
     }
   }, [roomId, clientId]);
@@ -246,14 +248,16 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         player.pauseVideo();
       }
     });
-
-    setPlayerPosition(payload.currentTimeSeconds);
-    setScrubValue(payload.currentTimeSeconds);
   }, []);
 
   const dispatchPlaybackCommand = useCallback(async (
     action: DirectPlaybackCommandPayload["action"],
-    options: { currentTimeSeconds: number; videoId?: string | null; playbackState: RoomStatePayload["playbackState"] }
+    options: {
+      currentTimeSeconds: number;
+      videoId?: string | null;
+      playbackState: RoomStatePayload["playbackState"];
+      applyLocally?: boolean;
+    }
   ) => {
     if (!joinedRef.current || !canControlPlayback) {
       return;
@@ -269,7 +273,9 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     };
 
     markPendingLocalSync(action);
-    applyDirectPlaybackCommand(payload);
+    if (options.applyLocally ?? true) {
+      applyDirectPlaybackCommand(payload);
+    }
     triggerDirectPlaybackCommand(payload);
 
     if (action === "video:set" && options.videoId) {
@@ -366,7 +372,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     let pusher: Pusher;
 
     const boot = () => {
-      setConnectionLabel("Starting room connection...");
+      setConnectionLabel("Starting space connection...");
 
       pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY || "", {
         cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER || "us2",
@@ -445,13 +451,13 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       channel.bind("room:error", (payload: RoomErrorPayload) => {
         if (!isMounted) return;
         joinedRef.current = false;
-        setConnectionLabel("Unable to join room.");
+        setConnectionLabel("Unable to join space.");
         setJoinError(payload.message);
       });
 
       pusher.connection.bind("connected", () => {
         if (!isMounted) return;
-        setConnectionLabel("Connected. Joining room...");
+        setConnectionLabel("Connected. Joining space...");
         emitAction("room:join", {
            displayName,
            image: viewer.image ?? null
@@ -465,8 +471,8 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
       pusher.connection.bind("error", () => {
         if (!isMounted) return;
-        setConnectionLabel("Room connection failed. Retrying...");
-        setJoinError("Could not connect to the room server yet. Retrying...");
+        setConnectionLabel("Space connection failed. Retrying...");
+        setJoinError("Could not connect to the space server yet. Retrying...");
       });
     };
 
@@ -515,8 +521,8 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         playerVars: {
           playsinline: 1,
           rel: 0,
-          controls: 0,
-          disablekb: 1,
+          controls: 1,
+          disablekb: 0,
           modestbranding: 1
         },
         events: {
@@ -524,6 +530,47 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
             playerReadyRef.current = true;
             if (roomStateRef.current) {
               applyRoomStateToPlayer(roomStateRef.current);
+            }
+          },
+          onStateChange: (event) => {
+            if (
+              suppressPlayerEventsRef.current ||
+              !joinedRef.current ||
+              !canControlPlayback ||
+              !roomStateRef.current?.videoId ||
+              typeof event.target.getCurrentTime !== "function" ||
+              !window.YT
+            ) {
+              return;
+            }
+
+            const currentTimeSeconds = clampPlaybackTime(event.target.getCurrentTime());
+
+            if (event.data === window.YT.PlayerState.PLAYING) {
+              hostPlaybackStateRef.current = "playing";
+              if (roomStateRef.current.playbackState !== "playing") {
+                void dispatchPlaybackCommand("playback:play", {
+                  currentTimeSeconds,
+                  playbackState: "playing",
+                  applyLocally: false
+                });
+              }
+              return;
+            }
+
+            if (event.data === window.YT.PlayerState.PAUSED) {
+              hostPlaybackStateRef.current = "paused";
+              if (
+                roomStateRef.current.playbackState !== "paused" ||
+                Math.abs(roomStateRef.current.currentTimeSeconds - currentTimeSeconds) >
+                  PLAYBACK_APPLY_TOLERANCE
+              ) {
+                void dispatchPlaybackCommand("playback:pause", {
+                  currentTimeSeconds,
+                  playbackState: "paused",
+                  applyLocally: false
+                });
+              }
             }
           }
         }
@@ -536,38 +583,56 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       playerRef.current?.destroy();
       playerRef.current = null;
     };
-  }, [applyRoomStateToPlayer]);
+  }, [applyRoomStateToPlayer, canControlPlayback, dispatchPlaybackCommand]);
 
   useEffect(() => {
-    if (!playerRef.current || !playerReadyRef.current) {
+    if (!playerRef.current || !playerReadyRef.current || !roomState?.videoId || !canControlPlayback) {
+      hostSeekSampleRef.current = null;
       return;
     }
 
     const intervalId = window.setInterval(() => {
       if (
         !playerRef.current ||
+        suppressPlayerEventsRef.current ||
         typeof playerRef.current.getCurrentTime !== "function"
       ) {
         return;
       }
 
       const currentTimeSeconds = clampPlaybackTime(playerRef.current.getCurrentTime());
-      const durationSeconds =
-        typeof playerRef.current.getDuration === "function"
-          ? clampPlaybackTime(playerRef.current.getDuration())
-          : 0;
+      const sampledAt = Date.now();
+      const previousSample = hostSeekSampleRef.current;
+      hostSeekSampleRef.current = { time: currentTimeSeconds, sampledAt };
 
-      setPlayerDuration(durationSeconds);
-      setPlayerPosition(currentTimeSeconds);
-      if (!isScrubbing) {
-        setScrubValue(currentTimeSeconds);
+      if (!previousSample) {
+        return;
       }
+
+      const elapsedSeconds = (sampledAt - previousSample.sampledAt) / 1000;
+      const expectedAdvance = hostPlaybackStateRef.current === "playing" ? elapsedSeconds : 0;
+      const measuredAdvance = currentTimeSeconds - previousSample.time;
+      const seekDelta = measuredAdvance - expectedAdvance;
+
+      if (
+        Math.abs(seekDelta) < HOST_SEEK_DETECTION_DELTA_SECONDS ||
+        sampledAt - lastHostSeekEmitAtRef.current < HOST_SEEK_EMIT_COOLDOWN_MS
+      ) {
+        return;
+      }
+
+      lastHostSeekEmitAtRef.current = sampledAt;
+      void dispatchPlaybackCommand("playback:seek", {
+        currentTimeSeconds,
+        playbackState: hostPlaybackStateRef.current,
+        applyLocally: false
+      });
     }, PLAYER_TIMELINE_POLL_MS);
 
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [isScrubbing]);
+  }, [canControlPlayback, dispatchPlaybackCommand, roomState?.videoId]);
 
   useEffect(() => {
     if (!playerRef.current || !joinedRef.current || !playerReadyRef.current || !roomState || canControlPlayback) {
@@ -627,6 +692,11 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
     const previousApplied = lastAppliedPlaybackRef.current;
     roomStateRef.current = roomState;
+    const isActiveController =
+      !!roomState.videoId &&
+      (roomState.playbackControllerUserId === viewer.id ||
+        roomState.playbackControllerClientId === clientId);
+
     if (
       (!previousApplied ||
         previousApplied.videoId !== roomState.videoId ||
@@ -634,6 +704,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         Math.abs(previousApplied.currentTimeSeconds - roomState.currentTimeSeconds) > PLAYBACK_APPLY_TOLERANCE ||
         previousApplied.playbackUpdatedAt !== roomState.playbackUpdatedAt ||
         previousApplied.playbackSequence !== roomState.playbackSequence) &&
+      (!isActiveController || roomState.playbackCommand === "video:set") &&
       !shouldSkipPlaybackApply({
         syncedBy: undefined,
         syncEvent: roomState.playbackCommand ?? undefined,
@@ -644,7 +715,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     ) {
       applyRoomStateToPlayer(roomState);
     }
-  }, [applyRoomStateToPlayer, clientId, roomState]);
+  }, [applyRoomStateToPlayer, clientId, roomState, viewer.id]);
 
   useEffect(() => {
     if (!isChatOpen || !chatListRef.current) {
@@ -696,13 +767,51 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       if (typingStopTimeoutRef.current !== null) {
         window.clearTimeout(typingStopTimeoutRef.current);
       }
+      if (typingActiveRef.current && clientId) {
+        void fetch(`/api/rooms/${roomId}/action`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "chat:typing", clientId, isTyping: false }),
+          keepalive: true
+        }).catch(() => undefined);
+      }
     };
-  }, []);
+  }, [clientId, roomId]);
+
+  useEffect(() => {
+    if (isChatOpen) {
+      return;
+    }
+
+    if (typingStopTimeoutRef.current !== null) {
+      window.clearTimeout(typingStopTimeoutRef.current);
+      typingStopTimeoutRef.current = null;
+    }
+
+    if (!typingActiveRef.current || !joinedRef.current) {
+      return;
+    }
+
+    typingActiveRef.current = false;
+    emitAction("chat:typing", { isTyping: false });
+  }, [emitAction, isChatOpen]);
+
+  useEffect(() => {
+    if ((roomState?.typingParticipants?.length ?? 0) === 0) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setTypingTick(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [roomState?.typingParticipants?.length]);
 
   function submitVideo() {
     if (!joinedRef.current) {
       setInlineNotice(null);
-      setInlineError("Room is still connecting. Wait for the room status to show connected.");
+      setInlineError("Space is still connecting. Wait for the status to show connected.");
       return;
     }
 
@@ -714,45 +823,13 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     }
 
     setInlineError(null);
-    setInlineNotice("Sending video to the room...");
+    setInlineNotice("Sending video to the space...");
     void dispatchPlaybackCommand("video:set", {
       videoId,
       currentTimeSeconds: 0,
       playbackState: "playing"
     });
     setInputUrl("");
-  }
-
-  function handlePlayPause() {
-    if (!roomState) {
-      return;
-    }
-
-    void dispatchPlaybackCommand(
-      roomState.playbackState === "playing" ? "playback:pause" : "playback:play",
-      {
-        currentTimeSeconds: playerPosition,
-        playbackState: roomState.playbackState === "playing" ? "paused" : "playing"
-      }
-    );
-  }
-
-  function handleSeek(deltaSeconds: number) {
-    const nextTime = clampPlaybackTime(playerPosition + deltaSeconds);
-    void dispatchPlaybackCommand("playback:seek", {
-      currentTimeSeconds: nextTime,
-      playbackState: roomState?.playbackState ?? "paused"
-    });
-  }
-
-  function commitScrub(nextTime: number) {
-    setIsScrubbing(false);
-    const clampedTime = clampPlaybackTime(nextTime);
-    setScrubValue(clampedTime);
-    void dispatchPlaybackCommand("playback:seek", {
-      currentTimeSeconds: clampedTime,
-      playbackState: roomState?.playbackState ?? "paused"
-    });
   }
 
   async function copyShareUrl() {
@@ -768,12 +845,12 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
     setDisplayName(storedName);
     setDraftName(storedName);
-    setInlineNotice("Updated your display name. Refreshing room presence...");
+    setInlineNotice("Updated your display name. Refreshing space presence...");
     setIsProfileOpen(false);
 
     joinedRef.current = false;
     setJoinError(null);
-    setConnectionLabel("Refreshing your room profile...");
+    setConnectionLabel("Refreshing your space profile...");
     emitAction("room:join", {
       displayName: storedName,
       image: viewer.image ?? null
@@ -820,15 +897,21 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       return;
     }
 
-    emitAction("chat:typing", { isTyping });
-
     if (typingStopTimeoutRef.current !== null) {
       window.clearTimeout(typingStopTimeoutRef.current);
       typingStopTimeoutRef.current = null;
     }
 
+    if (!isTyping && !typingActiveRef.current) {
+      return;
+    }
+
+    typingActiveRef.current = isTyping;
+    emitAction("chat:typing", { isTyping });
+
     if (isTyping) {
       typingStopTimeoutRef.current = window.setTimeout(() => {
+        typingActiveRef.current = false;
         emitAction("chat:typing", { isTyping: false });
         typingStopTimeoutRef.current = null;
       }, CHAT_TYPING_IDLE_MS);
@@ -841,8 +924,10 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   const unreadCount = visibleChatMessages.filter(
     (message) => message.clientId !== clientId && !message.readByClientIds.includes(clientId)
   ).length;
+  const typingReferenceTime = typingTick || Date.now();
   const typingNames = (roomState?.typingParticipants ?? [])
     .filter((participant) => participant.clientId !== clientId)
+    .filter((participant) => typingReferenceTime - (participant.lastTypedAt ?? 0) < CHAT_TYPING_STALE_MS)
     .map((participant) => participant.name);
 
   return (
@@ -916,7 +1001,9 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           <div className="video-shell">
             <div className="player-stage">
               <div id="youtube-player" />
-              {roomState?.videoId ? <div className="video-control-guard" aria-hidden="true" /> : null}
+              {roomState?.videoId && !canControlPlayback ? (
+                <div className="video-control-guard" aria-hidden="true" />
+              ) : null}
             </div>
             {!roomState?.videoId ? (
               <div className="video-placeholder">
@@ -927,54 +1014,6 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
               </div>
             ) : null}
           </div>
-          {roomState?.videoId ? (
-            <div className="player-controls">
-              <button
-                className="button-secondary"
-                type="button"
-                onClick={() => handleSeek(-10)}
-                disabled={!canControlPlayback}
-              >
-                -10s
-              </button>
-              <button
-                className="button"
-                type="button"
-                onClick={handlePlayPause}
-                disabled={!canControlPlayback}
-              >
-                {roomState.playbackState === "playing" ? "Pause" : "Play"}
-              </button>
-              <button
-                className="button-secondary"
-                type="button"
-                onClick={() => handleSeek(10)}
-                disabled={!canControlPlayback}
-              >
-                +10s
-              </button>
-              <div className="player-timeline">
-                <span className="player-time">{formatPlaybackTime(displayedPosition)}</span>
-                <input
-                  className="player-range"
-                  type="range"
-                  min={0}
-                  max={Math.max(playerDuration, displayedPosition, 1)}
-                  step={0.1}
-                  value={displayedPosition}
-                  onChange={(event) => {
-                    const nextValue = Number(event.target.value);
-                    setIsScrubbing(true);
-                    setScrubValue(nextValue);
-                  }}
-                  onMouseUp={(event) => commitScrub(Number((event.target as HTMLInputElement).value))}
-                  onTouchEnd={(event) => commitScrub(Number((event.target as HTMLInputElement).value))}
-                  disabled={!roomState.videoId || !canControlPlayback}
-                />
-                <span className="player-time">{formatPlaybackTime(playerDuration)}</span>
-              </div>
-            </div>
-          ) : null}
         </div>
 
         <section className="room-footer panel">
@@ -1137,6 +1176,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
                   setChatDraft(event.target.value);
                   setTypingState(event.target.value.trim().length > 0);
                 }}
+                onBlur={() => setTypingState(false)}
                 placeholder="Send a message to this space"
                 maxLength={400}
               />
@@ -1327,22 +1367,16 @@ function getRoomNotice(roomStatePayload: RoomChannelPayload, clientId: string): 
       roomStatePayload.syncedBy === clientId ? "You" : roomStatePayload.participantEvent.name;
 
     if (roomStatePayload.participantEvent.action === "joined") {
-      return `${actor} joined the room.`;
+      return `${actor} joined the space.`;
     }
     if (roomStatePayload.participantEvent.action === "left") {
-      return `${actor} left the room.`;
+      return `${actor} left the space.`;
     }
     if (roomStatePayload.participantEvent.action === "updated") {
       return roomStatePayload.syncedBy === clientId
         ? "Your display name was updated."
         : `${actor} updated their display name.`;
     }
-  }
-
-  if (roomStatePayload.syncEvent === "playback:mode") {
-    return roomState.playbackControlMode === "owner"
-      ? "Playback is now controlled by the host."
-      : "Playback control is now shared.";
   }
 
   return null;
@@ -1405,11 +1439,4 @@ function clampPlaybackTime(value: number) {
   }
 
   return Number(value.toFixed(2));
-}
-
-function formatPlaybackTime(seconds: number) {
-  const totalSeconds = Math.max(0, Math.floor(seconds));
-  const mins = Math.floor(totalSeconds / 60);
-  const secs = totalSeconds % 60;
-  return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
