@@ -66,8 +66,9 @@ const PRESENCE_HEARTBEAT_MS = 10_000;
 const HARD_RESYNC_DRIFT_SECONDS = 1.15;
 const SOFT_RESYNC_DRIFT_SECONDS = 0.55;
 const DIRECT_PLAYBACK_DEDUPE_MS = 2000;
-const HOST_SEEK_DETECTION_DELTA_SECONDS = 1.1;
-const HOST_SEEK_EMIT_COOLDOWN_MS = 650;
+const HOST_SEEK_DETECTION_DELTA_SECONDS = 0.45;
+const HOST_SEEK_EMIT_COOLDOWN_MS = 250;
+const HOST_STATE_EMIT_COOLDOWN_MS = 350;
 
 type Props = {
   roomId: string;
@@ -143,6 +144,11 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   const hostPlaybackStateRef = useRef<RoomStatePayload["playbackState"]>("paused");
   const hostSeekSampleRef = useRef<{ time: number; sampledAt: number } | null>(null);
   const lastHostSeekEmitAtRef = useRef(0);
+  const lastHostStateEmitRef = useRef<{
+    action: "playback:play" | "playback:pause";
+    issuedAt: number;
+    currentTimeSeconds: number;
+  } | null>(null);
   const queuedRemotePlaybackRef = useRef<DirectPlaybackCommandPayload | null>(null);
   const optimisticChatMessagesRef = useRef<Map<string, RoomStatePayload["chatMessages"][number]>>(
     new Map()
@@ -666,7 +672,18 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
             if (event.data === window.YT.PlayerState.PLAYING) {
               hostPlaybackStateRef.current = "playing";
-              if (roomStateRef.current.playbackState !== "playing") {
+              if (
+                shouldEmitHostPlaybackState(
+                  lastHostStateEmitRef.current,
+                  "playback:play",
+                  currentTimeSeconds
+                )
+              ) {
+                lastHostStateEmitRef.current = {
+                  action: "playback:play",
+                  issuedAt: Date.now(),
+                  currentTimeSeconds
+                };
                 void dispatchPlaybackCommand("playback:play", {
                   currentTimeSeconds,
                   playbackState: "playing",
@@ -679,10 +696,17 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
             if (event.data === window.YT.PlayerState.PAUSED) {
               hostPlaybackStateRef.current = "paused";
               if (
-                roomStateRef.current.playbackState !== "paused" ||
-                Math.abs(roomStateRef.current.currentTimeSeconds - currentTimeSeconds) >
-                  PLAYBACK_APPLY_TOLERANCE
+                shouldEmitHostPlaybackState(
+                  lastHostStateEmitRef.current,
+                  "playback:pause",
+                  currentTimeSeconds
+                )
               ) {
+                lastHostStateEmitRef.current = {
+                  action: "playback:pause",
+                  issuedAt: Date.now(),
+                  currentTimeSeconds
+                };
                 void dispatchPlaybackCommand("playback:pause", {
                   currentTimeSeconds,
                   playbackState: "paused",
@@ -1579,4 +1603,28 @@ function clampPlaybackTime(value: number) {
   }
 
   return Number(value.toFixed(2));
+}
+
+function shouldEmitHostPlaybackState(
+  previous: {
+    action: "playback:play" | "playback:pause";
+    issuedAt: number;
+    currentTimeSeconds: number;
+  } | null,
+  nextAction: "playback:play" | "playback:pause",
+  currentTimeSeconds: number
+) {
+  if (!previous) {
+    return true;
+  }
+
+  if (previous.action !== nextAction) {
+    return true;
+  }
+
+  if (Date.now() - previous.issuedAt > HOST_STATE_EMIT_COOLDOWN_MS) {
+    return true;
+  }
+
+  return Math.abs(previous.currentTimeSeconds - currentTimeSeconds) > PLAYBACK_APPLY_TOLERANCE;
 }
