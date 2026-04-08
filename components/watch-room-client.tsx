@@ -31,15 +31,20 @@ type YouTubeStateChangeEvent = {
   data: number;
 };
 
+type YouTubeErrorEvent = {
+  data: number;
+};
+
 type YouTubeApi = {
   Player: new (
     elementId: string,
     options: {
       videoId?: string;
-      playerVars?: Record<string, number>;
+      playerVars?: Record<string, string | number>;
       events?: {
         onReady?: (event: { target: YouTubePlayer }) => void;
         onStateChange?: (event: YouTubeStateChangeEvent) => void;
+        onError?: (event: YouTubeErrorEvent) => void;
       };
     }
   ) => YouTubePlayer;
@@ -302,10 +307,15 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       return false;
     }
 
+    const activeVideoId = payload.videoId ?? knownVideoIdRef.current ?? roomStateRef.current?.videoId ?? null;
+    if (!activeVideoId) {
+      return false;
+    }
+
     runWithSuppressedPlayerEvents(() => {
-      if (payload.action === "video:set" && payload.videoId) {
-        knownVideoIdRef.current = payload.videoId;
-        player.loadVideoById(payload.videoId, payload.currentTimeSeconds);
+      if (knownVideoIdRef.current !== activeVideoId || payload.action === "video:set") {
+        knownVideoIdRef.current = activeVideoId;
+        player.loadVideoById(activeVideoId, payload.currentTimeSeconds);
       } else {
         player.seekTo(payload.currentTimeSeconds, true);
       }
@@ -336,7 +346,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       action,
       actorClientId: clientId,
       currentTimeSeconds: clampPlaybackTime(options.currentTimeSeconds),
-      videoId: options.videoId,
+      videoId: options.videoId ?? knownVideoIdRef.current ?? roomStateRef.current?.videoId ?? null,
       playbackState: options.playbackState,
       issuedAt: Date.now()
     };
@@ -634,7 +644,8 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           rel: 0,
           controls: 1,
           disablekb: 0,
-          modestbranding: 1
+          modestbranding: 1,
+          origin: window.location.origin
         },
         events: {
           onReady: () => {
@@ -714,6 +725,17 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
                 });
               }
             }
+          },
+          onError: (event) => {
+            console.error("YouTube player error", event.data);
+            queuedRemotePlaybackRef.current = null;
+            knownVideoIdRef.current = roomStateRef.current?.videoId ?? knownVideoIdRef.current;
+
+            window.setTimeout(() => {
+              if (roomStateRef.current) {
+                applyRoomStateToPlayer(roomStateRef.current);
+              }
+            }, 250);
           }
         }
       });
