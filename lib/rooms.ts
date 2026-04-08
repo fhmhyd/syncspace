@@ -20,6 +20,7 @@ export type Participant = {
 
 export type ChatMessage = {
   id: string;
+  clientMessageId?: string | null;
   clientId: string;
   authorName: string;
   authorImage?: string | null;
@@ -463,7 +464,12 @@ export class RoomStore {
     );
   }
 
-  async addChatMessage(roomId: string, clientId: string, body: string): Promise<RoomState> {
+  async addChatMessage(
+    roomId: string,
+    clientId: string,
+    body: string,
+    clientMessageId?: string
+  ): Promise<RoomState> {
     return this.updateRoom(roomId, (room) => {
       this.requireMember(room, clientId);
       const participant = room.participants.find((entry) => entry.clientId === clientId);
@@ -474,6 +480,7 @@ export class RoomStore {
       const normalizedBody = normalizeChatBody(body);
       room.chatMessages.push({
         id: randomUUID(),
+        clientMessageId: normalizeClientMessageId(clientMessageId),
         clientId,
         authorName: participant.name,
         authorImage: participant.image ?? null,
@@ -688,6 +695,15 @@ function normalizeChatBody(value: string): string {
     throw new RoomError("INVALID_ROOM_MEMBER", "A message cannot be empty.");
   }
   return trimmed;
+}
+
+function normalizeClientMessageId(value?: string): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim().slice(0, 80);
+  return trimmed || null;
 }
 
 export function getRoomStore(): RoomStore {

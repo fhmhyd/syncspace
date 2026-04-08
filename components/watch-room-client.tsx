@@ -82,8 +82,8 @@ type RoomChannelPayload = {
 };
 
 type RealtimePlaybackChannel = {
-  bind(eventName: string, callback: (payload: DirectPlaybackCommandPayload) => void): void;
-  trigger(eventName: string, payload: DirectPlaybackCommandPayload): boolean;
+  bind(eventName: string, callback: (payload: unknown) => void): void;
+  trigger(eventName: string, payload: unknown): boolean;
 };
 
 type DirectPlaybackCommandPayload = {
@@ -93,6 +93,15 @@ type DirectPlaybackCommandPayload = {
   currentTimeSeconds: number;
   playbackState: RoomStatePayload["playbackState"];
   issuedAt: number;
+};
+
+type DirectChatMessagePayload = {
+  clientMessageId: string;
+  clientId: string;
+  authorName: string;
+  authorImage?: string | null;
+  body: string;
+  sentAt: number;
 };
 
 export default function WatchRoomClient({ roomId, viewer }: Props) {
@@ -109,6 +118,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   const [roomState, setRoomState] = useState<RoomStatePayload | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatDraft, setChatDraft] = useState("");
+  const [isSendingChat, setIsSendingChat] = useState(false);
   const [typingTick, setTypingTick] = useState(0);
 
   const pusherRef = useRef<Pusher | null>(null);
@@ -133,6 +143,11 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   const hostPlaybackStateRef = useRef<RoomStatePayload["playbackState"]>("paused");
   const hostSeekSampleRef = useRef<{ time: number; sampledAt: number } | null>(null);
   const lastHostSeekEmitAtRef = useRef(0);
+  const queuedRemotePlaybackRef = useRef<DirectPlaybackCommandPayload | null>(null);
+  const optimisticChatMessagesRef = useRef<Map<string, RoomStatePayload["chatMessages"][number]>>(
+    new Map()
+  );
+  const recentRemoteChatIdsRef = useRef<Set<string>>(new Set());
   const pendingLocalSyncRef = useRef<{
     syncEvent:
       | "video:set"
@@ -221,6 +236,53 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     }
   }
 
+  function triggerDirectChatMessage(payload: DirectChatMessagePayload) {
+    const channel = realtimeChannelRef.current;
+    if (!channel || typeof channel.trigger !== "function") {
+      return;
+    }
+
+    try {
+      channel.trigger("client-chat-message", payload);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  function mergeOptimisticChatMessages(
+    messages: RoomStatePayload["chatMessages"]
+  ): RoomStatePayload["chatMessages"] {
+    const merged = [...messages];
+    const knownClientMessageIds = new Set(
+      messages
+        .map((message) => message.clientMessageId)
+        .filter((value): value is string => typeof value === "string" && value.length > 0)
+    );
+
+    optimisticChatMessagesRef.current.forEach((message, clientMessageId) => {
+      if (!knownClientMessageIds.has(clientMessageId)) {
+        merged.push(message);
+      }
+    });
+
+    return merged
+      .sort((left, right) => left.sentAt - right.sentAt)
+      .slice(-100);
+  }
+
+  function acknowledgeOptimisticChatMessages(messages: RoomStatePayload["chatMessages"]) {
+    const deliveredIds = new Set(
+      messages
+        .map((message) => message.clientMessageId)
+        .filter((value): value is string => typeof value === "string" && value.length > 0)
+    );
+
+    deliveredIds.forEach((clientMessageId) => {
+      optimisticChatMessagesRef.current.delete(clientMessageId);
+      recentRemoteChatIdsRef.current.delete(clientMessageId);
+    });
+  }
+
   const applyDirectPlaybackCommand = useCallback((payload: DirectPlaybackCommandPayload) => {
     const player = playerRef.current;
     if (
@@ -231,7 +293,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       typeof player.pauseVideo !== "function" ||
       typeof player.loadVideoById !== "function"
     ) {
-      return;
+      return false;
     }
 
     runWithSuppressedPlayerEvents(() => {
@@ -248,6 +310,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         player.pauseVideo();
       }
     });
+    return true;
   }, []);
 
   const dispatchPlaybackCommand = useCallback(async (
@@ -405,15 +468,52 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         }
         lastDirectPlaybackEventRef.current = eventKey;
 
-        applyDirectPlaybackCommand(payload);
+        const applied = applyDirectPlaybackCommand(payload);
+        if (applied) {
+          recentRemotePlaybackRef.current = {
+            action: payload.action,
+            currentTimeSeconds: payload.currentTimeSeconds,
+            videoId: payload.videoId,
+            playbackState: payload.playbackState,
+            issuedAt: payload.issuedAt
+          };
+        } else {
+          queuedRemotePlaybackRef.current = payload;
+        }
+      });
 
-        recentRemotePlaybackRef.current = {
-          action: payload.action,
-          currentTimeSeconds: payload.currentTimeSeconds,
-          videoId: payload.videoId,
-          playbackState: payload.playbackState,
-          issuedAt: payload.issuedAt
+      realtimeChannel.bind("client-chat-message", (payload: DirectChatMessagePayload) => {
+        if (!isMounted || payload.clientId === clientId) {
+          return;
+        }
+
+        if (recentRemoteChatIdsRef.current.has(payload.clientMessageId)) {
+          return;
+        }
+        recentRemoteChatIdsRef.current.add(payload.clientMessageId);
+
+        const nextMessage = {
+          id: `remote-${payload.clientMessageId}`,
+          clientMessageId: payload.clientMessageId,
+          clientId: payload.clientId,
+          authorName: payload.authorName,
+          authorImage: payload.authorImage ?? null,
+          body: payload.body,
+          sentAt: payload.sentAt,
+          readByClientIds: [payload.clientId]
         };
+
+        optimisticChatMessagesRef.current.set(payload.clientMessageId, nextMessage);
+        setRoomState((current) => {
+          if (!current) {
+            return current;
+          }
+
+          return {
+            ...current,
+            chatMessages: mergeOptimisticChatMessages(current.chatMessages)
+          };
+        });
       });
 
       channel.bind("room:state", (data: RoomChannelPayload) => {
@@ -428,23 +528,28 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         ) {
           pendingLocalSyncRef.current = null;
         }
-        roomStateRef.current = nextState;
-        setRoomState(nextState);
+        acknowledgeOptimisticChatMessages(nextState.chatMessages ?? []);
+        const mergedState = {
+          ...nextState,
+          chatMessages: mergeOptimisticChatMessages(nextState.chatMessages ?? [])
+        };
+        roomStateRef.current = mergedState;
+        setRoomState(mergedState);
         setJoinError(null);
         setInlineError(null);
         setInlineNotice(getRoomNotice(data, clientId));
-        setConnectionLabel(getPresenceMessage(nextState.participants?.length || 0));
+        setConnectionLabel(getPresenceMessage(mergedState.participants?.length || 0));
         if (
-          shouldApplyIncomingPlayback(previousState, nextState, data.syncEvent) &&
+          shouldApplyIncomingPlayback(previousState, mergedState, data.syncEvent) &&
           !shouldSkipPlaybackApply({
             syncedBy: data.syncedBy,
             syncEvent: data.syncEvent,
             clientId,
-            nextState,
+            nextState: mergedState,
             recentRemotePlayback: recentRemotePlaybackRef.current
           })
         ) {
-          applyRoomStateToPlayer(nextState);
+          applyRoomStateToPlayer(mergedState);
         }
       });
 
@@ -528,6 +633,19 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
         events: {
           onReady: () => {
             playerReadyRef.current = true;
+            if (queuedRemotePlaybackRef.current) {
+              const queuedPlayback = queuedRemotePlaybackRef.current;
+              queuedRemotePlaybackRef.current = null;
+              if (applyDirectPlaybackCommand(queuedPlayback)) {
+                recentRemotePlaybackRef.current = {
+                  action: queuedPlayback.action,
+                  currentTimeSeconds: queuedPlayback.currentTimeSeconds,
+                  videoId: queuedPlayback.videoId,
+                  playbackState: queuedPlayback.playbackState,
+                  issuedAt: queuedPlayback.issuedAt
+                };
+              }
+            }
             if (roomStateRef.current) {
               applyRoomStateToPlayer(roomStateRef.current);
             }
@@ -583,7 +701,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       playerRef.current?.destroy();
       playerRef.current = null;
     };
-  }, [applyRoomStateToPlayer, canControlPlayback, dispatchPlaybackCommand]);
+  }, [applyDirectPlaybackCommand, applyRoomStateToPlayer, canControlPlayback, dispatchPlaybackCommand]);
 
   useEffect(() => {
     if (!playerRef.current || !playerReadyRef.current || !roomState?.videoId || !canControlPlayback) {
@@ -857,14 +975,27 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     });
   }
 
-  function submitChatMessage(event: FormEvent<HTMLFormElement>) {
+  async function submitChatMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = chatDraft.trim();
-    if (!value || !joinedRef.current) {
+    if (!value || !joinedRef.current || isSendingChat) {
       return;
     }
 
+    const clientMessageId = crypto.randomUUID();
+    const optimisticMessage = {
+      id: `pending-${clientMessageId}`,
+      clientMessageId,
+      clientId,
+      authorName: displayName,
+      authorImage: viewer.image ?? null,
+      body: value,
+      sentAt: Date.now(),
+      readByClientIds: [clientId]
+    };
+
     setTypingState(false);
+    optimisticChatMessagesRef.current.set(clientMessageId, optimisticMessage);
     setRoomState((current) => {
       if (!current) {
         return current;
@@ -872,24 +1003,51 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
       return {
         ...current,
-        chatMessages: [
-          ...current.chatMessages,
-          {
-            id: `pending-${crypto.randomUUID()}`,
-            clientId,
-            authorName: displayName,
-            authorImage: viewer.image ?? null,
-            body: value,
-            sentAt: Date.now(),
-            readByClientIds: [clientId]
-          }
-        ].slice(-100)
+        chatMessages: mergeOptimisticChatMessages(current.chatMessages)
       };
     });
+
+    triggerDirectChatMessage({
+      clientMessageId,
+      clientId,
+      authorName: displayName,
+      authorImage: viewer.image ?? null,
+      body: value,
+      sentAt: optimisticMessage.sentAt
+    });
+
     markPendingLocalSync("chat:message");
-    emitAction("chat:message", { body: value });
     setChatDraft("");
     setIsChatOpen(true);
+    setInlineError(null);
+    setIsSendingChat(true);
+
+    const response = await emitAction("chat:message", {
+      body: value,
+      clientMessageId
+    });
+
+    if (response) {
+      setIsSendingChat(false);
+      return;
+    }
+
+    optimisticChatMessagesRef.current.delete(clientMessageId);
+    recentRemoteChatIdsRef.current.delete(clientMessageId);
+    setRoomState((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        chatMessages: mergeOptimisticChatMessages(
+          current.chatMessages.filter((message) => message.clientMessageId !== clientMessageId)
+        )
+      };
+    });
+    setIsSendingChat(false);
+    setChatDraft((current) => (current ? current : value));
   }
 
   function setTypingState(isTyping: boolean) {
@@ -1180,8 +1338,8 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
                 placeholder="Send a message to this space"
                 maxLength={400}
               />
-              <button className="button" type="submit" disabled={!chatDraft.trim()}>
-                Send
+              <button className="button" type="submit" disabled={!chatDraft.trim() || isSendingChat}>
+                {isSendingChat ? "Sending..." : "Send"}
               </button>
             </form>
           </section>

@@ -13,6 +13,7 @@ type RoomActionRequestBody = {
   currentTimeSeconds?: number;
   body?: string;
   messageId?: string;
+  clientMessageId?: string;
   isTyping?: boolean;
 };
 
@@ -182,7 +183,8 @@ export async function POST(
         nextState = await store.addChatMessage(
           roomId,
           clientId,
-          validateActionString(actionData.body, "A message cannot be empty.")
+          validateActionString(actionData.body, "A message cannot be empty."),
+          actionData.clientMessageId
         );
         await broadcastRoomState(roomId, nextState, { syncedBy: clientId, syncEvent: "chat:message" });
         break;
