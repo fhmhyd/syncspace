@@ -423,10 +423,10 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
 
   useEffect(() => {
     setShareUrl(window.location.href);
-    setClientId(getOrCreateClientId(roomId));
+    setClientId(createClientId());
     setDisplayName(viewer.displayName);
     setDraftName(viewer.displayName);
-  }, [roomId, viewer.displayName]);
+  }, [viewer.displayName]);
 
   useEffect(() => {
     if (!clientId) return;
@@ -1540,26 +1540,8 @@ function getRoomNotice(roomStatePayload: RoomChannelPayload, clientId: string): 
   return null;
 }
 
-function getOrCreateClientId(roomId: string): string {
-  const roomKey = `syncscreen:${roomId}:client`;
-  const nameKeyPrefix = "syncscreen-client:";
-
-  if (window.name.startsWith(nameKeyPrefix)) {
-    const existingFromWindow = window.name.slice(nameKeyPrefix.length);
-    window.sessionStorage.setItem(roomKey, existingFromWindow);
-    return existingFromWindow;
-  }
-
-  const existingFromSession = window.sessionStorage.getItem(roomKey);
-  if (existingFromSession) {
-    window.name = `${nameKeyPrefix}${existingFromSession}`;
-    return existingFromSession;
-  }
-
-  const nextId = crypto.randomUUID();
-  window.sessionStorage.setItem(roomKey, nextId);
-  window.name = `${nameKeyPrefix}${nextId}`;
-  return nextId;
+function createClientId(): string {
+  return crypto.randomUUID();
 }
 
 async function loadYouTubeApi(): Promise<void> {
