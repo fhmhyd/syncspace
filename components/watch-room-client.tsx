@@ -235,6 +235,10 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   }
 
   function triggerDirectPlaybackCommand(payload: DirectPlaybackCommandPayload) {
+    if (payload.action === "video:set") {
+      return;
+    }
+
     const channel = realtimeChannelRef.current;
     if (!channel || typeof channel.trigger !== "function") {
       return;
@@ -312,8 +316,12 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       return false;
     }
 
+    if (payload.action !== "video:set" && knownVideoIdRef.current !== activeVideoId) {
+      return false;
+    }
+
     runWithSuppressedPlayerEvents(() => {
-      if (knownVideoIdRef.current !== activeVideoId || payload.action === "video:set") {
+      if (payload.action === "video:set") {
         knownVideoIdRef.current = activeVideoId;
         player.loadVideoById(activeVideoId, payload.currentTimeSeconds);
       } else {
