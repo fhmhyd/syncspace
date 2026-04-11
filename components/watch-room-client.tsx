@@ -49,8 +49,12 @@ type YouTubeApi = {
     }
   ) => YouTubePlayer;
   PlayerState: {
+    UNSTARTED: number;
+    ENDED: number;
     PLAYING: number;
     PAUSED: number;
+    BUFFERING: number;
+    CUED: number;
   };
 };
 
@@ -131,6 +135,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   const realtimeChannelRef = useRef<RealtimePlaybackChannel | null>(null);
   const playerRef = useRef<YouTubePlayer | null>(null);
   const suppressPlayerEventsRef = useRef(false);
+  const playerVideoReadyRef = useRef(false);
   const knownVideoIdRef = useRef<string | null>(null);
   const joinedRef = useRef(false);
   const roomStateRef = useRef<RoomStatePayload | null>(null);
@@ -316,13 +321,17 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       return false;
     }
 
-    if (payload.action !== "video:set" && knownVideoIdRef.current !== activeVideoId) {
+    if (
+      payload.action !== "video:set" &&
+      (knownVideoIdRef.current !== activeVideoId || !playerVideoReadyRef.current)
+    ) {
       return false;
     }
 
     runWithSuppressedPlayerEvents(() => {
       if (payload.action === "video:set") {
         knownVideoIdRef.current = activeVideoId;
+        playerVideoReadyRef.current = false;
         player.loadVideoById(activeVideoId, payload.currentTimeSeconds);
       } else {
         player.seekTo(payload.currentTimeSeconds, true);
@@ -399,6 +408,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
     if (nextState.videoId && knownVideoIdRef.current !== nextState.videoId) {
       const videoId = nextState.videoId;
       knownVideoIdRef.current = videoId;
+      playerVideoReadyRef.current = false;
       driftWarningCountRef.current = 0;
       runWithSuppressedPlayerEvents(() => {
         player.loadVideoById(videoId, getExpectedRoomTime(nextState));
@@ -678,11 +688,42 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
           onStateChange: (event) => {
             if (
               suppressPlayerEventsRef.current ||
+              !window.YT
+            ) {
+              return;
+            }
+
+            if (
+              event.data === window.YT.PlayerState.PLAYING ||
+              event.data === window.YT.PlayerState.PAUSED ||
+              event.data === window.YT.PlayerState.BUFFERING ||
+              event.data === window.YT.PlayerState.CUED
+            ) {
+              playerVideoReadyRef.current = true;
+              if (
+                queuedRemotePlaybackRef.current &&
+                queuedRemotePlaybackRef.current.videoId ===
+                  (knownVideoIdRef.current ?? roomStateRef.current?.videoId ?? null)
+              ) {
+                const queuedPlayback = queuedRemotePlaybackRef.current;
+                queuedRemotePlaybackRef.current = null;
+                if (applyDirectPlaybackCommand(queuedPlayback)) {
+                  recentRemotePlaybackRef.current = {
+                    action: queuedPlayback.action,
+                    currentTimeSeconds: queuedPlayback.currentTimeSeconds,
+                    videoId: queuedPlayback.videoId,
+                    playbackState: queuedPlayback.playbackState,
+                    issuedAt: queuedPlayback.issuedAt
+                  };
+                }
+              }
+            }
+
+            if (
               !joinedRef.current ||
               !canControlPlayback ||
               !roomStateRef.current?.videoId ||
-              typeof event.target.getCurrentTime !== "function" ||
-              !window.YT
+              typeof event.target.getCurrentTime !== "function"
             ) {
               return;
             }
