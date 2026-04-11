@@ -67,17 +67,17 @@ declare global {
 
 const PLAYBACK_APPLY_TOLERANCE = 0.25;
 const PLAYER_SUPPRESS_MS = 1200;
-const PLAYER_TIMELINE_POLL_MS = 250;
-const VIEWER_SYNC_INTERVAL_MS = 300;
+const PLAYER_TIMELINE_POLL_MS = 150;
+const VIEWER_SYNC_INTERVAL_MS = 180;
 const CHAT_TYPING_IDLE_MS = 1200;
 const CHAT_TYPING_STALE_MS = 4000;
 const PRESENCE_HEARTBEAT_MS = 10_000;
 const HARD_RESYNC_DRIFT_SECONDS = 1.15;
 const SOFT_RESYNC_DRIFT_SECONDS = 0.55;
 const DIRECT_PLAYBACK_DEDUPE_MS = 2000;
-const HOST_SEEK_DETECTION_DELTA_SECONDS = 0.45;
-const HOST_SEEK_EMIT_COOLDOWN_MS = 250;
-const HOST_STATE_EMIT_COOLDOWN_MS = 350;
+const HOST_SEEK_DETECTION_DELTA_SECONDS = 0.25;
+const HOST_SEEK_EMIT_COOLDOWN_MS = 120;
+const HOST_STATE_EMIT_COOLDOWN_MS = 180;
 
 type Props = {
   roomId: string;
@@ -1558,6 +1558,14 @@ function shouldSkipPlaybackApply(input: {
 
   if (input.syncedBy === input.clientId) {
     return true;
+  }
+
+  if (
+    input.syncEvent === "playback:play" ||
+    input.syncEvent === "playback:pause" ||
+    input.syncEvent === "playback:seek"
+  ) {
+    return false;
   }
 
   if (!input.recentRemotePlayback) {
