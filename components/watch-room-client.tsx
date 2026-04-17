@@ -19,6 +19,7 @@ type Viewer = {
 type YouTubePlayer = {
   destroy(): void;
   loadVideoById(videoId: string, startSeconds?: number): void;
+  cueVideoById(videoId: string, startSeconds?: number): void;
   playVideo(): void;
   pauseVideo(): void;
   seekTo(seconds: number, allowSeekAhead: boolean): void;
@@ -311,7 +312,8 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       typeof player.seekTo !== "function" ||
       typeof player.playVideo !== "function" ||
       typeof player.pauseVideo !== "function" ||
-      typeof player.loadVideoById !== "function"
+      typeof player.loadVideoById !== "function" ||
+      typeof player.cueVideoById !== "function"
     ) {
       return false;
     }
@@ -397,6 +399,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       !player ||
       !playerReadyRef.current ||
       typeof player.loadVideoById !== "function" ||
+      typeof player.cueVideoById !== "function" ||
       typeof player.playVideo !== "function" ||
       typeof player.pauseVideo !== "function" ||
       typeof player.seekTo !== "function" ||
@@ -411,14 +414,7 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       playerVideoReadyRef.current = false;
       driftWarningCountRef.current = 0;
       runWithSuppressedPlayerEvents(() => {
-        player.loadVideoById(videoId, getExpectedRoomTime(nextState));
-        window.setTimeout(() => {
-          if (nextState.playbackState === "playing") {
-            player.playVideo();
-          } else {
-            player.pauseVideo();
-          }
-        }, 250);
+        player.cueVideoById(videoId, getExpectedRoomTime(nextState));
       });
       return;
     }
@@ -716,6 +712,18 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
                     issuedAt: queuedPlayback.issuedAt
                   };
                 }
+              }
+
+              if (
+                roomStateRef.current?.videoId &&
+                knownVideoIdRef.current === roomStateRef.current.videoId &&
+                !canControlPlayback
+              ) {
+                window.setTimeout(() => {
+                  if (roomStateRef.current) {
+                    applyRoomStateToPlayer(roomStateRef.current);
+                  }
+                }, 40);
               }
             }
 
