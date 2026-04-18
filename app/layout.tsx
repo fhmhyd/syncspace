@@ -1,22 +1,15 @@
 import type { Metadata } from "next";
-import Providers from "@/components/providers";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "SyncScreen",
-  description: "Two-person synchronized YouTube watch rooms."
+  title: "SyncSpace",
+  description: "Connect Spotify and start syncing together."
 };
 
-export default function RootLayout({
-  children
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <body>
-        <Providers>{children}</Providers>
-      </body>
+    <html lang="en">
+      <body>{children}</body>
     </html>
   );
 }

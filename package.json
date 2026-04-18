@@ -1,5 +1,5 @@
 {
-  "name": "syncscreen",
+  "name": "syncspace",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -10,21 +10,17 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vercel/kv": "^3.0.0",
-    "next": "^15.1.0",
+    "next": "15.5.14",
     "next-auth": "^4.24.13",
-    "pusher": "^5.3.3",
-    "pusher-js": "^8.4.3",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "redis": "^5.11.0"
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
   },
   "devDependencies": {
-    "@types/node": "^22.10.2",
-    "@types/react": "^19.0.2",
-    "@types/react-dom": "^19.0.2",
-    "eslint": "^9.17.0",
-    "eslint-config-next": "^15.1.0",
-    "typescript": "^5.7.2"
+    "@types/node": "^24.6.0",
+    "@types/react": "^19.1.16",
+    "@types/react-dom": "^19.1.9",
+    "eslint": "^9.38.0",
+    "eslint-config-next": "15.5.14",
+    "typescript": "^5.9.3"
   }
 }

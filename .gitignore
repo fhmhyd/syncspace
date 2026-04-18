@@ -1,10 +1,7 @@
-node_modules
 .next
-tsconfig.tsbuildinfo
+node_modules
 .env.local
-.env*.local
-.devserver*.log
-auth-cookies.txt
-local-auth-cookies.txt
-
-.vercel
+out
+dist
+coverage
+*.tsbuildinfo
