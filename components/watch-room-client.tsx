@@ -325,6 +325,10 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
       return;
     }
 
+    if (!playerVideoReadyRef.current) {
+      return;
+    }
+
     const expectedTimeSeconds = getExpectedRoomTime(nextState);
     const localTime = player.getCurrentTime();
     const driftSeconds = Math.abs(localTime - expectedTimeSeconds);
@@ -695,7 +699,14 @@ export default function WatchRoomClient({ roomId, viewer }: Props) {
   }, [canControlPlayback, dispatchPlaybackCommand, roomState?.videoId]);
 
   useEffect(() => {
-    if (!playerRef.current || !joinedRef.current || !playerReadyRef.current || !roomState || canControlPlayback) {
+    if (
+      !playerRef.current ||
+      !joinedRef.current ||
+      !playerReadyRef.current ||
+      !playerVideoReadyRef.current ||
+      !roomState ||
+      canControlPlayback
+    ) {
       return;
     }
 
