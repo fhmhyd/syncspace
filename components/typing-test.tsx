@@ -70,6 +70,8 @@ export default function TypingTest() {
   const [status, setStatus] = useState<Status>("idle");
   const [typedValue, setTypedValue] = useState("");
   const [timeLeft, setTimeLeft] = useState<number>(duration);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [viewportWidth, setViewportWidth] = useState(1440);
 
   const startTimeRef = useRef<number | null>(null);
   const finishTimeRef = useRef<number | null>(null);
@@ -184,6 +186,19 @@ export default function TypingTest() {
     testRootRef.current?.focus();
   }, []);
 
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
+  useEffect(() => {
+    const syncViewport = () => setViewportWidth(window.innerWidth);
+
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
+
+    return () => window.removeEventListener("resize", syncViewport);
+  }, []);
+
   const totalTypedChars = typedValue.length;
   const correctChars = typedValue.split("").reduce((count, character, index) => {
     return count + (character === expectedText[index] ? 1 : 0);
@@ -198,15 +213,37 @@ export default function TypingTest() {
   const elapsedMinutes = Math.max(elapsedMs / 60000, 1 / 60000);
   const wpm = Math.round(correctChars / 5 / elapsedMinutes);
   const accuracy = totalTypedChars === 0 ? 100 : Math.round((correctChars / totalTypedChars) * 100);
+  const typedWordCount = typedValue.trim().length === 0 ? 0 : typedValue.trim().split(/\s+/).length;
+  const completedWordCount = typedValue.split("").reduce((count, character) => count + (character === " " ? 1 : 0), 0);
+  const characterBudget = viewportWidth < 640 ? 70 : viewportWidth < 960 ? 120 : 180;
+  const windowStartWordIndex = Math.max(0, completedWordCount - (viewportWidth < 640 ? 2 : 4));
+  const renderWindow = useMemo(() => {
+    let consumedCharacters = 0;
+    let fromGlobalChar = 0;
 
-  let visibleWordCount = mode === "time" ? expectedWords.length : wordGoal;
-  if (mode === "time" && status === "finished") {
-    const typedWordCount = typedValue.trim().length === 0 ? 25 : typedValue.trim().split(/\s+/).length + 18;
-    visibleWordCount = clamp(typedWordCount, 25, expectedWords.length);
-  }
+    for (let index = 0; index < windowStartWordIndex; index += 1) {
+      fromGlobalChar += expectedWords[index].length + 1;
+    }
 
-  const renderedWords = expectedWords.slice(0, visibleWordCount);
-  let globalIndex = 0;
+    const words: string[] = [];
+
+    for (let index = windowStartWordIndex; index < expectedWords.length; index += 1) {
+      const nextWord = expectedWords[index];
+      const nextLength = nextWord.length + (words.length > 0 ? 1 : 0);
+
+      if (words.length > 0 && consumedCharacters + nextLength > characterBudget) {
+        break;
+      }
+
+      words.push(nextWord);
+      consumedCharacters += nextLength;
+    }
+
+    return { fromGlobalChar, words };
+  }, [characterBudget, expectedWords, windowStartWordIndex]);
+
+  const renderedWords = renderWindow.words;
+  let globalIndex = renderWindow.fromGlobalChar;
 
   return (
     <main className="typing-shell">
@@ -215,13 +252,18 @@ export default function TypingTest() {
         <div className="brand-block">
           <KeyboardIcon />
           <div className="brand-copy">
-            <span className="brand-kicker">precision pace</span>
+            <span className="brand-kicker">typing practice</span>
             <h1>synctype</h1>
           </div>
         </div>
         <div className="header-meta">
-          <span>guest</span>
-          <span className="header-meta-count">{mode === "time" ? duration : wordGoal}</span>
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+          >
+            {theme === "dark" ? "light mode" : "dark mode"}
+          </button>
         </div>
       </header>
 
@@ -232,14 +274,14 @@ export default function TypingTest() {
             type="button"
             onClick={() => setIncludePunctuation((current) => !current)}
           >
-            @ punctuation
+            punctuation
           </button>
           <button
             className={`control-chip ${includeNumbers ? "is-active" : ""}`}
             type="button"
             onClick={() => setIncludeNumbers((current) => !current)}
           >
-            # numbers
+            numbers
           </button>
         </div>
 
@@ -257,15 +299,6 @@ export default function TypingTest() {
             onClick={() => setMode("words")}
           >
             words
-          </button>
-          <button className="control-chip is-muted" type="button">
-            quote
-          </button>
-          <button className="control-chip is-muted" type="button">
-            zen
-          </button>
-          <button className="control-chip is-muted" type="button">
-            custom
           </button>
         </div>
 
@@ -296,10 +329,11 @@ export default function TypingTest() {
       <section className="typing-stage" ref={testRootRef} tabIndex={-1}>
         <div className="stage-meta">
           <span>english</span>
-          <span>{mode === "time" ? `${timeLeft}s` : `${wordGoal} words`}</span>
+          <span>{mode === "time" ? `${timeLeft}s left` : `${wordGoal} word target`}</span>
         </div>
 
-        <div className="word-stream" aria-label="typing words">
+        <div className="word-frame">
+          <div className="word-stream" aria-label="typing words">
           {renderedWords.map((word, wordIndex) => {
             const chars = word.split("");
             const wordMarkup = chars.map((character, charIndex) => {
@@ -354,10 +388,11 @@ export default function TypingTest() {
               </span>
             );
           })}
+          </div>
         </div>
       </section>
 
-      <section className="result-strip">
+      <section className="result-strip" aria-hidden={status === "finished"}>
         <div className="result-block">
           <span className="result-label">wpm</span>
           <strong>{status === "idle" ? "--" : wpm}</strong>
@@ -376,6 +411,39 @@ export default function TypingTest() {
         <span className="restart-pill">tab</span>
         <span>restart test</span>
       </footer>
+
+      {status === "finished" ? (
+        <div className="results-overlay" role="dialog" aria-modal="true" aria-label="Typing results">
+          <div className="results-panel">
+            <span className="results-kicker">test complete</span>
+            <h2>{wpm} wpm</h2>
+            <p className="results-summary">
+              {accuracy}% accuracy with {incorrectChars} mistakes in {Math.max(1, Math.round(elapsedMs / 1000))} seconds.
+            </p>
+            <div className="results-grid">
+              <div className="results-stat">
+                <span>accuracy</span>
+                <strong>{accuracy}%</strong>
+              </div>
+              <div className="results-stat">
+                <span>errors</span>
+                <strong>{incorrectChars}</strong>
+              </div>
+              <div className="results-stat">
+                <span>time</span>
+                <strong>{Math.max(1, Math.round(elapsedMs / 1000))}s</strong>
+              </div>
+              <div className="results-stat">
+                <span>words</span>
+                <strong>{typedWordCount}</strong>
+              </div>
+            </div>
+            <button type="button" className="continue-test" onClick={regenerate}>
+              Try again
+            </button>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
