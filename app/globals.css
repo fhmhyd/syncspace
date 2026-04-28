@@ -214,7 +214,8 @@ button {
   letter-spacing: -0.03em;
   user-select: none;
   white-space: pre-wrap;
-  transition: color 160ms ease, transform 160ms ease;
+  transition: color 160ms ease, transform 220ms ease;
+  will-change: transform;
 }
 
 .word-frame {
@@ -229,6 +230,8 @@ button {
   background: color-mix(in srgb, var(--panel) 92%, transparent);
   box-shadow: 0 28px 70px rgba(0, 0, 0, 0.14);
   backdrop-filter: blur(18px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 16%, black 76%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 16%, black 76%, transparent 100%);
 }
 
 .word {
