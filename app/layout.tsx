@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "SyncSpace",
-  description: "Connect Spotify and start syncing together."
+  title: "Synctype",
+  description: "A focused online typing speed check."
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
