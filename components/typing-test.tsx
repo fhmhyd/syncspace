@@ -25,7 +25,6 @@ const TIME_OPTIONS = [15, 30, 60, 120] as const;
 const WORD_OPTIONS = [10, 25, 50, 100] as const;
 
 type Mode = "time" | "words";
-
 type Status = "idle" | "running" | "finished";
 
 function KeyboardIcon() {
@@ -70,20 +69,17 @@ export default function TypingTest() {
   const [status, setStatus] = useState<Status>("idle");
   const [typedValue, setTypedValue] = useState("");
   const [timeLeft, setTimeLeft] = useState<number>(duration);
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
-  const [viewportWidth, setViewportWidth] = useState(1440);
   const [lineOffset, setLineOffset] = useState(0);
 
   const startTimeRef = useRef<number | null>(null);
   const finishTimeRef = useRef<number | null>(null);
   const expectedWordsRef = useRef<string[]>([]);
-  const testRootRef = useRef<HTMLDivElement | null>(null);
+  const stageRef = useRef<HTMLElement | null>(null);
   const wordFrameRef = useRef<HTMLDivElement | null>(null);
   const currentCharRef = useRef<HTMLSpanElement | null>(null);
 
   const regenerate = useCallback(() => {
-    const nextWords = buildWordSet(mode === "time" ? 140 : wordGoal, includePunctuation, includeNumbers);
-    expectedWordsRef.current = nextWords;
+    expectedWordsRef.current = buildWordSet(mode === "time" ? 220 : Math.max(wordGoal + 80, 120), includePunctuation, includeNumbers);
     setTypedValue("");
     setStatus("idle");
     setTimeLeft(duration);
@@ -187,21 +183,29 @@ export default function TypingTest() {
   }, [mode, regenerate, status, timeLeft]);
 
   useEffect(() => {
-    testRootRef.current?.focus();
+    stageRef.current?.focus();
   }, []);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-  }, [theme]);
+    if (!wordFrameRef.current || !currentCharRef.current || status === "finished") {
+      return;
+    }
 
-  useEffect(() => {
-    const syncViewport = () => setViewportWidth(window.innerWidth);
+    const frameRect = wordFrameRef.current.getBoundingClientRect();
+    const charRect = currentCharRef.current.getBoundingClientRect();
+    const lineHeight = parseFloat(window.getComputedStyle(currentCharRef.current).lineHeight);
 
-    syncViewport();
-    window.addEventListener("resize", syncViewport);
+    if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
+      return;
+    }
 
-    return () => window.removeEventListener("resize", syncViewport);
-  }, []);
+    const relativeTop = charRect.top - frameRect.top + lineOffset;
+    const nextOffset = Math.max(0, Math.floor((relativeTop - lineHeight * 1.7) / lineHeight) * lineHeight);
+
+    if (Math.abs(nextOffset - lineOffset) >= 1) {
+      setLineOffset(nextOffset);
+    }
+  }, [lineOffset, status, typedValue]);
 
   const totalTypedChars = typedValue.length;
   const correctChars = typedValue.split("").reduce((count, character, index) => {
@@ -216,63 +220,26 @@ export default function TypingTest() {
         : 0;
   const elapsedMinutes = Math.max(elapsedMs / 60000, 1 / 60000);
   const wpm = Math.round(correctChars / 5 / elapsedMinutes);
+  const rawWpm = Math.round(totalTypedChars / 5 / elapsedMinutes);
   const accuracy = totalTypedChars === 0 ? 100 : Math.round((correctChars / totalTypedChars) * 100);
   const typedWordCount = typedValue.trim().length === 0 ? 0 : typedValue.trim().split(/\s+/).length;
-  const renderedWords = useMemo(() => {
-    if (mode === "time") {
-      return expectedWords.slice(0, viewportWidth < 640 ? 80 : 120);
-    }
-
-    return expectedWords;
-  }, [expectedWords, mode, viewportWidth]);
-
-  useEffect(() => {
-    if (!wordFrameRef.current || !currentCharRef.current) {
-      return;
-    }
-
-    const frameRect = wordFrameRef.current.getBoundingClientRect();
-    const charRect = currentCharRef.current.getBoundingClientRect();
-    const lineHeight = parseFloat(window.getComputedStyle(currentCharRef.current).lineHeight);
-
-    if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
-      return;
-    }
-
-    const relativeTop = charRect.top - frameRect.top + lineOffset;
-    const targetOffset = Math.max(0, Math.floor((relativeTop - lineHeight * 1.6) / lineHeight) * lineHeight);
-
-    if (Math.abs(targetOffset - lineOffset) >= 1) {
-      setLineOffset(targetOffset);
-    }
-  }, [lineOffset, renderedWords, typedValue, viewportWidth]);
 
   let globalIndex = 0;
 
   return (
     <main className="typing-shell">
-      <div className="typing-noise" />
       <header className="typing-header">
         <div className="brand-block">
           <KeyboardIcon />
           <div className="brand-copy">
-            <span className="brand-kicker">typing practice</span>
+            <span className="brand-kicker">precision typing</span>
             <h1>synctype</h1>
           </div>
-        </div>
-        <div className="header-meta">
-          <button
-            type="button"
-            className="theme-toggle"
-            onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
-          >
-            {theme === "dark" ? "light mode" : "dark mode"}
-          </button>
         </div>
       </header>
 
       <section className="control-row">
-        <div className="control-group">
+        <div className="control-cluster">
           <button
             className={`control-chip ${includePunctuation ? "is-active" : ""}`}
             type="button"
@@ -289,7 +256,7 @@ export default function TypingTest() {
           </button>
         </div>
 
-        <div className="control-group">
+        <div className="control-cluster">
           <button
             className={`control-chip ${mode === "time" ? "is-active" : ""}`}
             type="button"
@@ -306,7 +273,7 @@ export default function TypingTest() {
           </button>
         </div>
 
-        <div className="control-group">
+        <div className="control-cluster">
           {(mode === "time" ? TIME_OPTIONS : WORD_OPTIONS).map((option) => {
             const isActive = mode === "time" ? duration === option : wordGoal === option;
 
@@ -330,126 +297,118 @@ export default function TypingTest() {
         </div>
       </section>
 
-      <section className="typing-stage" ref={testRootRef} tabIndex={-1}>
-        <div className="stage-meta">
-          <span>english</span>
-          <span>{mode === "time" ? `${timeLeft}s left` : `${wordGoal} word target`}</span>
-        </div>
-
-        <div className="word-frame" ref={wordFrameRef}>
-          <div className="word-stream" aria-label="typing words" style={{ transform: `translateY(-${lineOffset}px)` }}>
-          {renderedWords.map((word, wordIndex) => {
-            const chars = word.split("");
-            const wordMarkup = chars.map((character, charIndex) => {
-              const currentIndex = globalIndex;
-              const typedCharacter = typedValue[currentIndex];
-              const isTyped = currentIndex < typedValue.length;
-              const isCorrect = typedCharacter === character;
-              const isCurrent = currentIndex === typedValue.length && status !== "finished";
-
-              globalIndex += 1;
-
-              return (
-                <span
-                  key={`${wordIndex}-${charIndex}-${character}`}
-                  ref={isCurrent ? currentCharRef : null}
-                  className={[
-                    "char",
-                    isTyped ? (isCorrect ? "is-correct" : "is-incorrect") : "",
-                    isCurrent ? "is-current" : ""
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                >
-                  {character}
-                </span>
-              );
-            });
-
-            const spacerIndex = globalIndex;
-            const typedSpace = typedValue[spacerIndex];
-            const isSpaceTyped = spacerIndex < typedValue.length;
-            const isSpaceCurrent = spacerIndex === typedValue.length && status !== "finished";
-
-            globalIndex += 1;
-
-            return (
-              <span key={`${word}-${wordIndex}`} className="word">
-                {wordMarkup}
-                {wordIndex < renderedWords.length - 1 ? (
-                  <span
-                    ref={isSpaceCurrent ? currentCharRef : null}
-                    className={[
-                      "char",
-                      "char-space",
-                      isSpaceTyped ? (typedSpace === " " ? "is-correct" : "is-incorrect") : "",
-                      isSpaceCurrent ? "is-current" : ""
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                  >
-                    {" "}
-                  </span>
-                ) : null}
-              </span>
-            );
-          })}
+      <section className="typing-stage" ref={stageRef} tabIndex={-1}>
+        {status === "finished" ? (
+          <div className="results-stage">
+            <div className="results-primary">
+              <div className="results-metric">
+                <span className="result-label">wpm</span>
+                <strong>{wpm}</strong>
+              </div>
+              <div className="results-metric">
+                <span className="result-label">acc</span>
+                <strong>{accuracy}%</strong>
+              </div>
+            </div>
+            <div className="results-secondary">
+              <div className="results-stat">
+                <span className="result-label">raw</span>
+                <strong>{rawWpm}</strong>
+              </div>
+              <div className="results-stat">
+                <span className="result-label">chars</span>
+                <strong>
+                  {correctChars}/{incorrectChars}/{Math.max(0, expectedText.length - totalTypedChars)}
+                </strong>
+              </div>
+              <div className="results-stat">
+                <span className="result-label">words</span>
+                <strong>{typedWordCount}</strong>
+              </div>
+              <div className="results-stat">
+                <span className="result-label">time</span>
+                <strong>{Math.max(1, Math.round(elapsedMs / 1000))}s</strong>
+              </div>
+            </div>
           </div>
-        </div>
-      </section>
+        ) : (
+          <>
+            <div className="stage-meta">
+              <span>english</span>
+            </div>
 
-      <section className="result-strip" aria-hidden={status === "finished"}>
-        <div className="result-block">
-          <span className="result-label">wpm</span>
-          <strong>{status === "idle" ? "--" : wpm}</strong>
-        </div>
-        <div className="result-block">
-          <span className="result-label">accuracy</span>
-          <strong>{status === "idle" ? "--" : `${accuracy}%`}</strong>
-        </div>
-        <div className="result-block">
-          <span className="result-label">errors</span>
-          <strong>{incorrectChars}</strong>
-        </div>
+            <div className="word-frame" ref={wordFrameRef}>
+              <div className="word-stream" aria-label="typing words" style={{ transform: `translateY(-${lineOffset}px)` }}>
+                {expectedWords.map((word, wordIndex) => {
+                  const chars = word.split("");
+                  const wordMarkup = chars.map((character, charIndex) => {
+                    const currentIndex = globalIndex;
+                    const typedCharacter = typedValue[currentIndex];
+                    const isTyped = currentIndex < typedValue.length;
+                    const isCorrect = typedCharacter === character;
+                    const isCurrent = currentIndex === typedValue.length;
+
+                    globalIndex += 1;
+
+                    return (
+                      <span
+                        key={`${wordIndex}-${charIndex}-${character}`}
+                        ref={isCurrent ? currentCharRef : null}
+                        className={[
+                          "char",
+                          isTyped ? (isCorrect ? "is-correct" : "is-incorrect") : "",
+                          isCurrent ? "is-current" : ""
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                      >
+                        {character}
+                      </span>
+                    );
+                  });
+
+                  const spacerIndex = globalIndex;
+                  const typedSpace = typedValue[spacerIndex];
+                  const isSpaceTyped = spacerIndex < typedValue.length;
+                  const isSpaceCurrent = spacerIndex === typedValue.length;
+
+                  globalIndex += 1;
+
+                  return (
+                    <span key={`${word}-${wordIndex}`} className="word">
+                      {wordMarkup}
+                      {wordIndex < expectedWords.length - 1 ? (
+                        <span
+                          ref={isSpaceCurrent ? currentCharRef : null}
+                          className={[
+                            "char",
+                            "char-space",
+                            isSpaceTyped ? (typedSpace === " " ? "is-correct" : "is-incorrect") : "",
+                            isSpaceCurrent ? "is-current" : ""
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                        >
+                          {" "}
+                        </span>
+                      ) : null}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="live-bar">
+              <span className="live-metric">{mode === "time" ? timeLeft : wordGoal}</span>
+            </div>
+          </>
+        )}
       </section>
 
       <footer className="typing-footer">
         <span className="restart-pill">tab</span>
         <span>restart test</span>
       </footer>
-
-      {status === "finished" ? (
-        <div className="results-overlay" role="dialog" aria-modal="true" aria-label="Typing results">
-          <div className="results-panel">
-            <span className="results-kicker">test complete</span>
-            <h2>{wpm} wpm</h2>
-            <p className="results-summary">
-              {accuracy}% accuracy with {incorrectChars} mistakes in {Math.max(1, Math.round(elapsedMs / 1000))} seconds.
-            </p>
-            <div className="results-grid">
-              <div className="results-stat">
-                <span>accuracy</span>
-                <strong>{accuracy}%</strong>
-              </div>
-              <div className="results-stat">
-                <span>errors</span>
-                <strong>{incorrectChars}</strong>
-              </div>
-              <div className="results-stat">
-                <span>time</span>
-                <strong>{Math.max(1, Math.round(elapsedMs / 1000))}s</strong>
-              </div>
-              <div className="results-stat">
-                <span>words</span>
-                <strong>{typedWordCount}</strong>
-              </div>
-            </div>
-            <button type="button" className="continue-test" onClick={regenerate}>
-              Try again
-            </button>
-          </div>
-        </div>
-      ) : null}
     </main>
   );
 }
