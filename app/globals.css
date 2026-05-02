@@ -115,7 +115,8 @@ button {
 }
 
 .typing-stage {
-  margin-top: 10rem;
+  margin-top: 8.5rem;
+  position: relative;
 }
 
 .stage-meta {
@@ -128,10 +129,11 @@ button {
 
 .word-frame {
   max-width: 100%;
-  height: 11.4rem;
+  height: 18rem;
   overflow: hidden;
-  mask-image: linear-gradient(to bottom, transparent 0%, black 14%, black 78%, transparent 100%);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 14%, black 78%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 6%, black 92%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 6%, black 92%, transparent 100%);
+  position: relative;
 }
 
 .word-stream {
@@ -139,15 +141,23 @@ button {
   flex-wrap: wrap;
   align-content: flex-start;
   font-size: clamp(2rem, 2.6vw, 2.75rem);
-  line-height: 1.62;
+  line-height: 1.64;
   letter-spacing: -0.03em;
   user-select: none;
+  padding-top: 2.35rem;
+  padding-bottom: 4rem;
   transition: transform 180ms ease;
   will-change: transform;
 }
 
 .word {
   display: inline-flex;
+  margin-right: 0.52em;
+  position: relative;
+}
+
+.word.is-active {
+  z-index: 1;
 }
 
 .char {
@@ -163,24 +173,45 @@ button {
   color: var(--error);
 }
 
-.char.is-current::after {
-  content: "";
+.char.is-missed {
+  color: #7a565a;
+}
+
+.char.extra {
+  color: #8b434a;
+}
+
+.caret-anchor {
   position: absolute;
-  left: -0.04em;
-  top: 0.14em;
-  width: 0.08em;
-  height: 1.02em;
-  background: var(--accent);
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 1em;
+}
+
+.caret-anchor.after-extra {
+  left: 100%;
+}
+
+.caret-anchor.trailing-anchor {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  height: 1em;
+}
+
+.typing-caret {
+  position: absolute;
+  width: 0.12rem;
   border-radius: 999px;
+  background: var(--accent);
+  pointer-events: none;
+  transition: top 0.1s ease, left 0.1s ease;
   animation: blink 1s steps(1, end) infinite;
 }
 
-.char-space {
-  width: 0.52em;
-}
-
 .live-bar {
-  margin-top: 1.6rem;
+  margin-top: 1rem;
   min-height: 2rem;
 }
 
@@ -252,6 +283,15 @@ button {
   font-size: 0.78rem;
 }
 
+.typing-hidden-input {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 @keyframes blink {
   0%, 50% {
     opacity: 1;
@@ -272,16 +312,18 @@ button {
   }
 
   .typing-stage {
-    margin-top: 5rem;
+    margin-top: 4.5rem;
   }
 
   .word-frame {
-    height: 9.5rem;
+    height: 13.5rem;
   }
 
   .word-stream {
     font-size: 1.45rem;
     line-height: 1.78;
+    padding-top: 1.6rem;
+    padding-bottom: 2.6rem;
   }
 
   .results-primary {

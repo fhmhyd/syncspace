@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 
 const BASE_WORDS = [
   "about", "after", "again", "air", "all", "along", "also", "always", "another", "answer",
@@ -23,9 +23,27 @@ const PUNCTUATION = [".", ",", ";", ":", "!", "?"];
 const NUMBER_WORDS = ["2026", "15", "30", "60", "120", "404", "99", "7"];
 const TIME_OPTIONS = [15, 30, 60, 120] as const;
 const WORD_OPTIONS = [10, 25, 50, 100] as const;
+const TARGET_VISIBLE_LINES = 3;
+const APPEND_BATCH = 18;
 
 type Mode = "time" | "words";
 type Status = "idle" | "running" | "finished";
+
+type WordState = {
+  id: number;
+  text: string;
+  typed: string;
+  extras: string[];
+  submitted: boolean;
+  incorrect: boolean;
+};
+
+type CaretPosition = {
+  left: number;
+  top: number;
+  height: number;
+  visible: boolean;
+};
 
 function KeyboardIcon() {
   return (
@@ -36,28 +54,48 @@ function KeyboardIcon() {
   );
 }
 
-function buildWordSet(count: number, includePunctuation: boolean, includeNumbers: boolean) {
-  const words: string[] = [];
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
 
-  for (let index = 0; index < count; index += 1) {
-    let word = BASE_WORDS[Math.floor(Math.random() * BASE_WORDS.length)];
+function createWords(
+  count: number,
+  includePunctuation: boolean,
+  includeNumbers: boolean,
+  nextIdRef: MutableRefObject<number>
+) {
+  return Array.from({ length: count }, (_, index) => {
+    let text = BASE_WORDS[Math.floor(Math.random() * BASE_WORDS.length)];
 
     if (includeNumbers && index % 9 === 4) {
-      word = NUMBER_WORDS[Math.floor(Math.random() * NUMBER_WORDS.length)];
+      text = NUMBER_WORDS[Math.floor(Math.random() * NUMBER_WORDS.length)];
     }
 
     if (includePunctuation && index % 7 === 3) {
-      word = `${word}${PUNCTUATION[Math.floor(Math.random() * PUNCTUATION.length)]}`;
+      text = `${text}${PUNCTUATION[Math.floor(Math.random() * PUNCTUATION.length)]}`;
     }
 
-    words.push(word);
-  }
-
-  return words;
+    return {
+      id: nextIdRef.current++,
+      text,
+      typed: "",
+      extras: [],
+      submitted: false,
+      incorrect: false
+    } satisfies WordState;
+  });
 }
 
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
+function getWordIncorrect(word: WordState) {
+  if (word.extras.length > 0) {
+    return true;
+  }
+
+  if (word.typed.length !== word.text.length) {
+    return true;
+  }
+
+  return word.typed.split("").some((character, index) => character !== word.text[index]);
 }
 
 export default function TypingTest() {
@@ -67,33 +105,46 @@ export default function TypingTest() {
   const [includePunctuation, setIncludePunctuation] = useState(false);
   const [includeNumbers, setIncludeNumbers] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
-  const [typedValue, setTypedValue] = useState("");
   const [timeLeft, setTimeLeft] = useState<number>(duration);
-  const [lineOffset, setLineOffset] = useState(0);
+  const [words, setWords] = useState<WordState[]>([]);
+  const [currentWordIndex, setCurrentWordIndex] = useState(0);
+  const [caret, setCaret] = useState<CaretPosition>({ left: 0, top: 0, height: 0, visible: false });
+  const [typedCharCount, setTypedCharCount] = useState(0);
+  const [totalKeystrokes, setTotalKeystrokes] = useState(0);
+  const [correctKeystrokes, setCorrectKeystrokes] = useState(0);
 
+  const nextIdRef = useRef(1);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const wordFrameRef = useRef<HTMLDivElement | null>(null);
+  const wordRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const caretAnchorRef = useRef<HTMLSpanElement | null>(null);
+  const prevLineIndexRef = useRef(0);
+  const lineHeightRef = useRef(0);
   const startTimeRef = useRef<number | null>(null);
   const finishTimeRef = useRef<number | null>(null);
-  const expectedWordsRef = useRef<string[]>([]);
-  const stageRef = useRef<HTMLElement | null>(null);
-  const wordFrameRef = useRef<HTMLDivElement | null>(null);
-  const currentCharRef = useRef<HTMLSpanElement | null>(null);
 
   const regenerate = useCallback(() => {
-    expectedWordsRef.current = buildWordSet(mode === "time" ? 220 : Math.max(wordGoal + 80, 120), includePunctuation, includeNumbers);
-    setTypedValue("");
+    setWords(createWords(32, includePunctuation, includeNumbers, nextIdRef));
+    setCurrentWordIndex(0);
     setStatus("idle");
     setTimeLeft(duration);
-    setLineOffset(0);
+    setTypedCharCount(0);
+    setTotalKeystrokes(0);
+    setCorrectKeystrokes(0);
+    prevLineIndexRef.current = 0;
+    lineHeightRef.current = 0;
     startTimeRef.current = null;
     finishTimeRef.current = null;
-  }, [duration, includeNumbers, includePunctuation, mode, wordGoal]);
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+  }, [duration, includeNumbers, includePunctuation]);
 
   useEffect(() => {
     regenerate();
   }, [regenerate]);
 
-  const expectedWords = expectedWordsRef.current;
-  const expectedText = useMemo(() => expectedWords.join(" "), [expectedWords]);
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (mode === "time") {
@@ -124,94 +175,310 @@ export default function TypingTest() {
     return () => window.clearInterval(intervalId);
   }, [duration, mode, status]);
 
-  const finishTest = useCallback(() => {
-    finishTimeRef.current = Date.now();
-    setStatus("finished");
+  const appendWords = useCallback((count: number) => {
+    setWords((current) => [...current, ...createWords(count, includePunctuation, includeNumbers, nextIdRef)]);
+  }, [includeNumbers, includePunctuation]);
+
+  const finalizeWord = useCallback((index: number, moveNext: boolean) => {
+    let wordIncorrect = false;
+
+    setWords((current) => {
+      const nextWords = [...current];
+      const word = nextWords[index];
+
+      if (!word) {
+        return current;
+      }
+
+      wordIncorrect = getWordIncorrect(word);
+      nextWords[index] = {
+        ...word,
+        submitted: true,
+        incorrect: wordIncorrect
+      };
+
+      return nextWords;
+    });
+
+    if (moveNext) {
+      setCurrentWordIndex((current) => current + 1);
+    }
+
+    return wordIncorrect;
   }, []);
 
-  useEffect(() => {
-    if (mode === "words" && typedValue.length >= expectedText.length && status === "running") {
-      finishTest();
+  const handleCharacter = useCallback((character: string) => {
+    if (status === "finished") {
+      return;
     }
-  }, [expectedText.length, finishTest, mode, status, typedValue.length]);
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Tab") {
-        event.preventDefault();
-        regenerate();
-        return;
+    if (status === "idle") {
+      startTimeRef.current = Date.now();
+      setStatus("running");
+    }
+
+    if (mode === "time" && timeLeft === 0) {
+      return;
+    }
+
+    const targetWord = words[currentWordIndex];
+    if (!targetWord) {
+      return;
+    }
+
+    const baseIndex = targetWord.typed.length;
+    const expectedCharacter = baseIndex < targetWord.text.length ? targetWord.text[baseIndex] : null;
+    const isCorrect = expectedCharacter === character;
+
+    setWords((current) => {
+      const nextWords = [...current];
+      const word = nextWords[currentWordIndex];
+
+      if (!word) {
+        return current;
       }
 
-      if (event.key === "Escape") {
-        regenerate();
-        return;
+      if (word.typed.length < word.text.length) {
+        nextWords[currentWordIndex] = {
+          ...word,
+          typed: word.typed + character
+        };
+      } else {
+        nextWords[currentWordIndex] = {
+          ...word,
+          extras: [...word.extras, character]
+        };
       }
 
-      if (event.metaKey || event.ctrlKey || event.altKey || status === "finished") {
-        return;
-      }
+      return nextWords;
+    });
 
-      if (event.key === "Backspace") {
-        event.preventDefault();
-        setTypedValue((current) => current.slice(0, -1));
-        return;
-      }
+    setTypedCharCount((current) => current + 1);
+    setTotalKeystrokes((current) => current + 1);
+    setCorrectKeystrokes((current) => current + (isCorrect ? 1 : 0));
+  }, [currentWordIndex, mode, status, timeLeft, words]);
 
-      if (event.key.length !== 1) {
-        return;
-      }
+  const handleBackspace = useCallback(() => {
+    if (status === "finished") {
+      return;
+    }
 
-      event.preventDefault();
+    const currentWord = words[currentWordIndex];
+    if (!currentWord) {
+      return;
+    }
 
-      setTypedValue((current) => {
-        if (status === "idle") {
-          startTimeRef.current = Date.now();
-          setStatus("running");
-        }
-
-        if (mode === "time" && timeLeft === 0) {
+    if (currentWord.extras.length > 0) {
+      setWords((current) => {
+        const nextWords = [...current];
+        const word = nextWords[currentWordIndex];
+        if (!word) {
           return current;
         }
 
-        return current + event.key;
+        nextWords[currentWordIndex] = {
+          ...word,
+          extras: word.extras.slice(0, -1)
+        };
+        return nextWords;
       });
-    };
+      return;
+    }
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [mode, regenerate, status, timeLeft]);
+    if (currentWord.typed.length > 0) {
+      setWords((current) => {
+        const nextWords = [...current];
+        const word = nextWords[currentWordIndex];
+        if (!word) {
+          return current;
+        }
+
+        nextWords[currentWordIndex] = {
+          ...word,
+          typed: word.typed.slice(0, -1),
+          submitted: false,
+          incorrect: false
+        };
+
+        return nextWords;
+      });
+      return;
+    }
+
+    if (currentWordIndex === 0) {
+      return;
+    }
+
+    const previousWord = words[currentWordIndex - 1];
+    if (!previousWord || !previousWord.incorrect) {
+      return;
+    }
+
+    setCurrentWordIndex((current) => current - 1);
+    setWords((current) => {
+      const nextWords = [...current];
+      const word = nextWords[currentWordIndex - 1];
+      if (!word) {
+        return current;
+      }
+
+      nextWords[currentWordIndex - 1] = {
+        ...word,
+        submitted: false
+      };
+
+      return nextWords;
+    });
+  }, [currentWordIndex, status, words]);
+
+  const handleSpace = useCallback(() => {
+    if (status === "finished") {
+      return;
+    }
+
+    if (status === "idle") {
+      startTimeRef.current = Date.now();
+      setStatus("running");
+    }
+
+    const currentWord = words[currentWordIndex];
+    if (!currentWord) {
+      return;
+    }
+
+    const expectedSpaceCorrect = currentWord.typed.length === currentWord.text.length && currentWord.extras.length === 0;
+    setTotalKeystrokes((current) => current + 1);
+    setCorrectKeystrokes((current) => current + (expectedSpaceCorrect ? 1 : 0));
+
+    finalizeWord(currentWordIndex, true);
+  }, [currentWordIndex, finalizeWord, status, words]);
+
+  const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Tab") {
+      event.preventDefault();
+      regenerate();
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      regenerate();
+      return;
+    }
+
+    if (event.metaKey || event.ctrlKey || event.altKey) {
+      return;
+    }
+
+    if (event.key === "Backspace") {
+      event.preventDefault();
+      handleBackspace();
+      return;
+    }
+
+    if (event.key === " ") {
+      event.preventDefault();
+      handleSpace();
+      return;
+    }
+
+    if (event.key.length === 1) {
+      event.preventDefault();
+      handleCharacter(event.key);
+    }
+  }, [handleBackspace, handleCharacter, handleSpace, regenerate]);
 
   useEffect(() => {
-    stageRef.current?.focus();
-  }, []);
+    if (mode === "words" && currentWordIndex >= wordGoal && status === "running") {
+      finishTimeRef.current = Date.now();
+      setStatus("finished");
+    }
+  }, [currentWordIndex, mode, status, wordGoal]);
 
-  useEffect(() => {
-    if (!wordFrameRef.current || !currentCharRef.current || status === "finished") {
+  useLayoutEffect(() => {
+    if (!wordFrameRef.current || words.length === 0) {
+      return;
+    }
+
+    const refs = words
+      .map((word) => ({ id: word.id, element: wordRefs.current.get(word.id) }))
+      .filter((entry): entry is { id: number; element: HTMLDivElement } => Boolean(entry.element));
+
+    if (refs.length === 0) {
+      return;
+    }
+
+    const lineMap = new Map<number, number>();
+    let lineIndex = -1;
+    let lastTop = Number.NaN;
+
+    refs.forEach(({ id, element }) => {
+      const top = element.offsetTop;
+      if (Number.isNaN(lastTop) || top !== lastTop) {
+        lineIndex += 1;
+        lastTop = top;
+      }
+      lineMap.set(id, lineIndex);
+    });
+
+    const visibleLineCount = lineIndex + 1;
+
+    if (visibleLineCount < TARGET_VISIBLE_LINES + 1) {
+      appendWords(APPEND_BATCH);
+      return;
+    }
+
+    if (currentWordIndex >= words.length - 12) {
+      appendWords(APPEND_BATCH);
+    }
+
+    const activeWord = words[currentWordIndex];
+    if (!activeWord) {
+      return;
+    }
+
+    const activeLine = lineMap.get(activeWord.id) ?? 0;
+    const activeElement = wordRefs.current.get(activeWord.id);
+
+    if (activeElement) {
+      lineHeightRef.current = activeElement.getBoundingClientRect().height;
+    }
+
+    if (activeLine > prevLineIndexRef.current && activeLine >= 2 && lineHeightRef.current > 0) {
+      const removableCount = refs.filter(({ id }) => (lineMap.get(id) ?? 0) === 0).length;
+
+      if (removableCount > 0) {
+        setWords((current) => {
+          const trimmed = current.slice(removableCount);
+          return [...trimmed, ...createWords(Math.max(removableCount, 10), includePunctuation, includeNumbers, nextIdRef)];
+        });
+        setCurrentWordIndex((current) => current - removableCount);
+        prevLineIndexRef.current = Math.max(0, activeLine - 1);
+      }
+
+      return;
+    }
+
+    prevLineIndexRef.current = activeLine;
+  }, [appendWords, currentWordIndex, includeNumbers, includePunctuation, words]);
+
+  useLayoutEffect(() => {
+    if (!wordFrameRef.current || !caretAnchorRef.current || status === "finished") {
+      setCaret((current) => ({ ...current, visible: false }));
       return;
     }
 
     const frameRect = wordFrameRef.current.getBoundingClientRect();
-    const charRect = currentCharRef.current.getBoundingClientRect();
-    const lineHeight = parseFloat(window.getComputedStyle(currentCharRef.current).lineHeight);
+    const anchorRect = caretAnchorRef.current.getBoundingClientRect();
 
-    if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
-      return;
-    }
+      setCaret({
+        left: anchorRect.left - frameRect.left,
+        top: anchorRect.top - frameRect.top,
+        height: anchorRect.height,
+        visible: true
+      });
+  }, [currentWordIndex, status, words]);
 
-    const relativeTop = charRect.top - frameRect.top + lineOffset;
-    const nextOffset = Math.max(0, Math.floor((relativeTop - lineHeight * 1.7) / lineHeight) * lineHeight);
-
-    if (Math.abs(nextOffset - lineOffset) >= 1) {
-      setLineOffset(nextOffset);
-    }
-  }, [lineOffset, status, typedValue]);
-
-  const totalTypedChars = typedValue.length;
-  const correctChars = typedValue.split("").reduce((count, character, index) => {
-    return count + (character === expectedText[index] ? 1 : 0);
-  }, 0);
-  const incorrectChars = totalTypedChars - correctChars;
   const elapsedMs =
     status === "finished"
       ? (finishTimeRef.current ?? Date.now()) - (startTimeRef.current ?? Date.now())
@@ -219,15 +486,19 @@ export default function TypingTest() {
         ? Date.now() - (startTimeRef.current ?? Date.now())
         : 0;
   const elapsedMinutes = Math.max(elapsedMs / 60000, 1 / 60000);
-  const wpm = Math.round(correctChars / 5 / elapsedMinutes);
-  const rawWpm = Math.round(totalTypedChars / 5 / elapsedMinutes);
-  const accuracy = totalTypedChars === 0 ? 100 : Math.round((correctChars / totalTypedChars) * 100);
-  const typedWordCount = typedValue.trim().length === 0 ? 0 : typedValue.trim().split(/\s+/).length;
+  const wpm = Math.round((typedCharCount / 5) / elapsedMinutes);
+  const accuracy = totalKeystrokes === 0 ? 100 : Math.round((correctKeystrokes / totalKeystrokes) * 100);
+  const currentMetric = mode === "time" ? timeLeft : Math.max(0, wordGoal - currentWordIndex);
 
-  let globalIndex = 0;
+  const visibleWords = useMemo(() => {
+    if (mode === "words") {
+      return words.slice(0, wordGoal + 30);
+    }
+    return words;
+  }, [mode, wordGoal, words]);
 
   return (
-    <main className="typing-shell">
+    <main className="typing-shell" onClick={() => inputRef.current?.focus()}>
       <header className="typing-header">
         <div className="brand-block">
           <KeyboardIcon />
@@ -297,7 +568,19 @@ export default function TypingTest() {
         </div>
       </section>
 
-      <section className="typing-stage" ref={stageRef} tabIndex={-1}>
+      <section className="typing-stage">
+        <input
+          ref={inputRef}
+          className="typing-hidden-input"
+          autoCapitalize="off"
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
+          value=""
+          onChange={() => undefined}
+          onKeyDown={handleKeyDown}
+        />
+
         {status === "finished" ? (
           <div className="results-stage">
             <div className="results-primary">
@@ -312,18 +595,16 @@ export default function TypingTest() {
             </div>
             <div className="results-secondary">
               <div className="results-stat">
-                <span className="result-label">raw</span>
-                <strong>{rawWpm}</strong>
+                <span className="result-label">keystrokes</span>
+                <strong>{totalKeystrokes}</strong>
               </div>
               <div className="results-stat">
-                <span className="result-label">chars</span>
-                <strong>
-                  {correctChars}/{incorrectChars}/{Math.max(0, expectedText.length - totalTypedChars)}
-                </strong>
+                <span className="result-label">correct</span>
+                <strong>{correctKeystrokes}</strong>
               </div>
               <div className="results-stat">
                 <span className="result-label">words</span>
-                <strong>{typedWordCount}</strong>
+                <strong>{currentWordIndex}</strong>
               </div>
               <div className="results-stat">
                 <span className="result-label">time</span>
@@ -338,68 +619,79 @@ export default function TypingTest() {
             </div>
 
             <div className="word-frame" ref={wordFrameRef}>
-              <div className="word-stream" aria-label="typing words" style={{ transform: `translateY(-${lineOffset}px)` }}>
-                {expectedWords.map((word, wordIndex) => {
-                  const chars = word.split("");
-                  const wordMarkup = chars.map((character, charIndex) => {
-                    const currentIndex = globalIndex;
-                    const typedCharacter = typedValue[currentIndex];
-                    const isTyped = currentIndex < typedValue.length;
-                    const isCorrect = typedCharacter === character;
-                    const isCurrent = currentIndex === typedValue.length;
-
-                    globalIndex += 1;
-
-                    return (
-                      <span
-                        key={`${wordIndex}-${charIndex}-${character}`}
-                        ref={isCurrent ? currentCharRef : null}
-                        className={[
-                          "char",
-                          isTyped ? (isCorrect ? "is-correct" : "is-incorrect") : "",
-                          isCurrent ? "is-current" : ""
-                        ]
-                          .filter(Boolean)
-                          .join(" ")}
-                      >
-                        {character}
-                      </span>
-                    );
-                  });
-
-                  const spacerIndex = globalIndex;
-                  const typedSpace = typedValue[spacerIndex];
-                  const isSpaceTyped = spacerIndex < typedValue.length;
-                  const isSpaceCurrent = spacerIndex === typedValue.length;
-
-                  globalIndex += 1;
+              <div
+                className="word-stream"
+                aria-label="typing words"
+              >
+                {visibleWords.map((word, wordIndex) => {
+                  const isCurrentWord = wordIndex === currentWordIndex;
+                  const visibleTypedLength = Math.min(word.typed.length, word.text.length);
+                  const caretSlot = isCurrentWord ? visibleTypedLength : -1;
 
                   return (
-                    <span key={`${word}-${wordIndex}`} className="word">
-                      {wordMarkup}
-                      {wordIndex < expectedWords.length - 1 ? (
-                        <span
-                          ref={isSpaceCurrent ? currentCharRef : null}
-                          className={[
-                            "char",
-                            "char-space",
-                            isSpaceTyped ? (typedSpace === " " ? "is-correct" : "is-incorrect") : "",
-                            isSpaceCurrent ? "is-current" : ""
-                          ]
-                            .filter(Boolean)
-                            .join(" ")}
-                        >
-                          {" "}
-                        </span>
+                    <div
+                      key={word.id}
+                      className={`word ${isCurrentWord ? "is-active" : ""}`}
+                      ref={(element) => {
+                        if (element) {
+                          wordRefs.current.set(word.id, element);
+                        } else {
+                          wordRefs.current.delete(word.id);
+                        }
+                      }}
+                    >
+                      {word.text.split("").map((character, charIndex) => {
+                        let className = "char";
+
+                        if (charIndex < word.typed.length) {
+                          className += word.typed[charIndex] === character ? " is-correct" : " is-incorrect";
+                        } else if (word.submitted) {
+                          className += " is-missed";
+                        }
+
+                        const attachCaret = isCurrentWord && caretSlot === charIndex;
+
+                        return (
+                          <span key={`${word.id}-${charIndex}`} className={className}>
+                            {attachCaret ? <span ref={caretAnchorRef} className="caret-anchor" /> : null}
+                            {character}
+                          </span>
+                        );
+                      })}
+
+                      {word.extras.map((character, extraIndex) => {
+                        const attachCaret = isCurrentWord && word.typed.length >= word.text.length && extraIndex === word.extras.length - 1;
+
+                        return (
+                          <span key={`${word.id}-extra-${extraIndex}`} className="char extra">
+                            {character}
+                            {attachCaret ? <span ref={caretAnchorRef} className="caret-anchor after-extra" /> : null}
+                          </span>
+                        );
+                      })}
+
+                      {isCurrentWord && word.typed.length === word.text.length && word.extras.length === 0 ? (
+                        <span ref={caretAnchorRef} className="caret-anchor trailing-anchor" />
                       ) : null}
-                    </span>
+                    </div>
                   );
                 })}
               </div>
+
+              {caret.visible ? (
+                <div
+                  className="typing-caret"
+                  style={{
+                    left: `${caret.left}px`,
+                    top: `${caret.top}px`,
+                    height: `${caret.height}px`
+                  }}
+                />
+              ) : null}
             </div>
 
             <div className="live-bar">
-              <span className="live-metric">{mode === "time" ? timeLeft : wordGoal}</span>
+              <span className="live-metric">{currentMetric}</span>
             </div>
           </>
         )}
